@@ -1,0 +1,15 @@
+.DS_Store
+.build/
+.build-*/
+.swiftpm/
+DerivedData/
+dist/
+*.dmg
+*.pkg
+*.xcarchive
+xcuserdata/
+.env
+.env.*
+!.env.example
+Resources/AppIcon-public-source*.png
+Resources/AppIcon-alpha.png

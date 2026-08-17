@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1024 1024">
+  <defs>
+    <clipPath id="macos-icon-mask">
+      <rect x="110" y="110" width="804" height="804" rx="153"/>
+    </clipPath>
+  </defs>
+  <image
+    x="100"
+    y="100"
+    width="824"
+    height="824"
+    preserveAspectRatio="xMidYMid slice"
+    clip-path="url(#macos-icon-mask)"
+    xlink:href="AppIcon-source.png"
+  />
+</svg>
