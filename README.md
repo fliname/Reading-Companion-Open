@@ -1,6 +1,6 @@
 # Reading Companion Open
 
-当前版本：0.42.16（Build 76）。这是可与原版 Reading Companion 并存的公开版，使用独立的应用名称、Bundle ID、设置、缓存和密钥目录。
+当前版本：0.43.8。这是可与原版 Reading Companion 并存的公开版，使用独立的应用名称、Bundle ID、设置、缓存和密钥目录。
 
 一个原生 macOS PDF 伴读应用：本地 OCR、带页码 AI 问答、三色划线与 Obsidian 结构化笔记。
 
@@ -8,7 +8,7 @@
 
 ### 1. 安装公开版
 
-1. 打开 `Reading-Companion-Open-0.42.16-macOS-arm64.dmg`。
+1. 打开 `Reading-Companion-Open-0.43.8-macOS-arm64.dmg`。
 2. 把 **Reading Companion Open** 拖入 **Applications**。它与原版 Reading Companion 使用不同名称、Bundle ID 和数据目录，可以同时安装。
 3. 首次启动若被 macOS 拦截，请在 Finder 中右键应用，选择“打开”。当前社区安装包使用临时签名，尚未经过 Apple 公证。
 
