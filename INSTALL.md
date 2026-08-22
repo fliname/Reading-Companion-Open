@@ -14,7 +14,6 @@
 
 1. 下载并运行 `Reading-Companion-Open-0.43.18-Windows-x64-Setup.exe`。
 2. 按安装向导完成安装。若 SmartScreen 提示未知发布者，确认文件来自本仓库后选择“更多信息 → 仍要运行”。
-3. 不想安装时，可下载 Portable ZIP，解压后运行其中的 `Reading Companion Open.exe`。
 
 要求：Windows 10/11，x64。
 
@@ -24,5 +23,3 @@
 2. 点击左侧“目录”标题，选择自动识别、手动添加或恢复 PDF 自带目录。
 3. AI 伴读为可选功能，需要在设置中填写自己的 API Key。
 4. 如需结构化笔记，先在 Obsidian 创建或打开 Vault，再在应用设置中选择该 Vault。
-
-发布页同时提供 `SHA256SUMS.txt`，可用于核对下载文件。
