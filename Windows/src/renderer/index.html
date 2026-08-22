@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; connect-src 'self'; worker-src 'self' blob:;">
+  <title>Reading Companion Open</title>
+  <link rel="stylesheet" href="./vendor/pdf_viewer.css">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <svg class="icon-sprite" aria-hidden="true">
+    <symbol id="icon-sidebar-left" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M9 4v16"></path></symbol>
+    <symbol id="icon-sidebar-right" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M15 4v16"></path></symbol>
+    <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 7.5h7l2-2h9v13H3z"></path></symbol>
+    <symbol id="icon-books" viewBox="0 0 24 24"><path d="M4 5h4v14H4zM10 4h4v15h-4zM16 6l3-1 3 13-3 1z"></path></symbol>
+    <symbol id="icon-fit" viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="16" rx="1"></rect><path d="m8 9-2 3 2 3M16 9l2 3-2 3"></path></symbol>
+    <symbol id="icon-zoom-out" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"></circle><path d="m15 15 5 5M7 10h6"></path></symbol>
+    <symbol id="icon-zoom-in" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"></circle><path d="m15 15 5 5M7 10h6M10 7v6"></path></symbol>
+    <symbol id="icon-rotate" viewBox="0 0 24 24"><path d="M19 8V4l-2 2a8 8 0 1 0 2.2 8"></path></symbol>
+    <symbol id="icon-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></symbol>
+    <symbol id="icon-bookmark" viewBox="0 0 24 24"><path d="M6 4h12v17l-6-4-6 4z"></path></symbol>
+    <symbol id="icon-highlighter" viewBox="0 0 24 24"><path d="m14 4 6 6-9 9H5v-6zM4 21h16"></path></symbol>
+    <symbol id="icon-note" viewBox="0 0 24 24"><rect x="4" y="3" width="14" height="18" rx="2"></rect><path d="M8 8h6M8 12h6M8 16h4"></path><circle cx="18" cy="17" r="4" class="icon-accent-fill"></circle><path d="M18 15v4M16 17h4" class="icon-white"></path></symbol>
+    <symbol id="icon-gear" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path><circle cx="12" cy="12" r="3"></circle></symbol>
+    <symbol id="icon-outline" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11"></path><circle cx="4" cy="6" r="1"></circle><circle cx="4" cy="12" r="1"></circle><circle cx="4" cy="18" r="1"></circle></symbol>
+    <symbol id="icon-thumbnails" viewBox="0 0 24 24"><rect x="4" y="3" width="7" height="8" rx="1"></rect><rect x="13" y="3" width="7" height="8" rx="1"></rect><rect x="4" y="13" width="7" height="8" rx="1"></rect><rect x="13" y="13" width="7" height="8" rx="1"></rect></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"></circle><path d="m15 15 5 5"></path></symbol>
+    <symbol id="icon-chat" viewBox="0 0 24 24"><path d="M4 5h16v12H9l-5 4z"></path></symbol>
+    <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M15 8V5H5v10h3"></path></symbol>
+    <symbol id="icon-annotation" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="16" rx="2"></rect><path d="M8 8h8M8 12h6M5 22h14" class="icon-green"></path></symbol>
+    <symbol id="icon-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M6 11a6 6 0 0 0 12 0M12 17v4M9 21h6"></path></symbol>
+    <symbol id="icon-expand" viewBox="0 0 24 24"><path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"></path></symbol>
+    <symbol id="icon-summary" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M7 8h2M12 8h5M7 12h2M12 12h5M7 16h2M12 16h5"></path></symbol>
+    <symbol id="icon-book-closed" viewBox="0 0 24 24"><path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3z"></path><path d="M8 4v16M8 16h11"></path></symbol>
+    <symbol id="icon-open-note" viewBox="0 0 24 24"><rect x="4" y="5" width="13" height="15" rx="2"></rect><path d="M12 3h9v9M21 3l-10 10"></path></symbol>
+    <symbol id="icon-arrow-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="m9 8 4 4-4 4M13 12h5"></path></symbol>
+  </svg>
+  <div id="app">
+    <header class="toolbar">
+      <button id="toggleSidebar" class="icon-button" title="显示或隐藏导航栏"><svg class="app-icon"><use href="#icon-sidebar-left"></use></svg></button>
+      <button id="openPDF" class="tool-button"><svg class="app-icon"><use href="#icon-folder"></use></svg><span>打开</span></button>
+      <button id="openBookshelf" class="tool-button"><svg class="app-icon"><use href="#icon-books"></use></svg><span>书架</span></button>
+      <span class="separator"></span>
+      <label class="fit-control" title="调整页面大小"><svg class="app-icon"><use href="#icon-fit"></use></svg><select id="fitMode"><option value="page-width">适宽</option><option value="page-fit">整页</option><option value="custom">缩放</option></select></label>
+      <button id="zoomOut" class="icon-button" title="缩小"><svg class="app-icon"><use href="#icon-zoom-out"></use></svg></button>
+      <span id="zoomLabel" class="fixed-label">100%</span>
+      <button id="zoomIn" class="icon-button" title="放大"><svg class="app-icon"><use href="#icon-zoom-in"></use></svg></button>
+      <button id="rotatePage" class="icon-button" title="顺时针旋转"><svg class="app-icon"><use href="#icon-rotate"></use></svg></button>
+      <button id="lockScroll" class="icon-button" title="锁定左右滑动与缩放"><svg class="app-icon"><use href="#icon-lock"></use></svg></button>
+      <span class="separator"></span>
+      <button id="toggleBookmark" class="icon-button bookmark-button" title="添加当前页书签"><svg class="app-icon"><use href="#icon-bookmark"></use></svg></button>
+      <div class="highlight-tool">
+        <button id="highlightMode" class="icon-button" title="划线模式"><svg class="app-icon"><use href="#icon-highlighter"></use></svg></button>
+        <button class="color-dot yellow selected" data-highlight-color="yellow" aria-label="黄色划线"></button>
+        <button class="color-dot red" data-highlight-color="red" aria-label="红色划线"></button>
+        <button class="color-dot blue" data-highlight-color="blue" aria-label="蓝色划线"></button>
+      </div>
+      <button id="openNotes" class="icon-button" title="Obsidian 笔记中心"><svg class="app-icon"><use href="#icon-note"></use></svg></button>
+      <span class="toolbar-spacer"></span>
+      <button id="toggleAssistant" class="icon-button" title="显示或隐藏 AI 伴读"><svg class="app-icon"><use href="#icon-sidebar-right"></use></svg></button>
+    </header>
+
+    <main class="workspace">
+      <aside id="leftSidebar" class="left-sidebar">
+        <nav class="sidebar-tabs" aria-label="导航">
+          <button class="active" data-sidebar-tab="outline" title="目录" aria-label="目录"><svg class="app-icon"><use href="#icon-outline"></use></svg></button>
+          <button data-sidebar-tab="thumbnails" title="缩略图" aria-label="缩略图"><svg class="app-icon"><use href="#icon-thumbnails"></use></svg></button>
+          <button data-sidebar-tab="bookmarks" title="书签" aria-label="书签"><svg class="app-icon"><use href="#icon-bookmark"></use></svg></button>
+          <button data-sidebar-tab="highlights" title="划线与批注" aria-label="划线与批注"><svg class="app-icon"><use href="#icon-highlighter"></use></svg></button>
+          <button data-sidebar-tab="search" title="搜索" aria-label="搜索"><svg class="app-icon"><use href="#icon-search"></use></svg></button>
+        </nav>
+        <section id="outlinePanel" class="sidebar-panel active">
+          <div class="panel-header outline-header">
+            <div class="panel-title-row">
+              <h2><button id="toggleOutlineTools" class="outline-title-button" aria-expanded="false"><span>目录</span><span class="outline-tools-chevron">▸</span></button></h2>
+              <span class="panel-title-spacer"></span>
+              <button id="toggleOutlineSummaries" class="summary-master-button" title="显示章节概要的展开按钮"><svg class="app-icon"><use href="#icon-summary"></use></svg><span>概要</span></button>
+            </div>
+            <div id="outlineTools" class="outline-tools hidden">
+              <button id="recognizeOutline" class="small-primary">自动识别</button>
+              <button id="manualOutline" class="small-button">手动添加</button>
+              <button id="restoreEmbeddedOutline" class="small-button">恢复自带目录</button>
+            </div>
+            <p id="outlineStatus">等待文档</p>
+          </div>
+          <div id="outlineList" class="outline-list"></div>
+          <div class="outline-notes-actions">
+            <button id="createNotebook"><svg class="app-icon"><use href="#icon-book-closed"></use></svg><span>创建笔记本</span></button>
+            <button id="addOutlineToNotes"><svg class="app-icon"><use href="#icon-note"></use></svg><span>添加目录</span></button>
+            <button id="openNotebook"><svg class="app-icon"><use href="#icon-open-note"></use></svg><span>打开笔记本</span></button>
+          </div>
+        </section>
+        <section id="thumbnailsPanel" class="sidebar-panel">
+          <div class="panel-header"><h2>缩略图</h2></div>
+          <div id="thumbnailList" class="thumbnail-list"></div>
+        </section>
+        <section id="bookmarksPanel" class="sidebar-panel">
+          <div class="panel-header"><h2>书签</h2></div>
+          <div id="bookmarkList" class="record-list"></div>
+        </section>
+        <section id="highlightsPanel" class="sidebar-panel">
+          <div class="panel-header stacked">
+            <h2>划线与批注</h2>
+            <div class="highlight-search-row">
+              <input id="highlightSearchInput" placeholder="搜索划线或批注" aria-label="搜索划线或批注">
+              <button id="runHighlightSearch" title="搜索划线或批注" aria-label="搜索划线或批注"><svg class="app-icon"><use href="#icon-arrow-circle"></use></svg></button>
+            </div>
+            <div class="filter-row">
+              <button class="filter-dot active" data-filter="all">全部</button>
+              <button class="color-dot yellow" data-filter="yellow" title="黄色"></button>
+              <button class="color-dot red" data-filter="red" title="红色"></button>
+              <button class="color-dot blue" data-filter="blue" title="蓝色"></button>
+              <button class="annotation-filter" data-filter="annotation">批注</button>
+              <span id="highlightSearchCount" class="highlight-search-count"></span>
+            </div>
+          </div>
+          <div class="record-toolbar">
+            <label><input id="selectAllMarks" type="checkbox">全选</label>
+            <button id="mergeMarks">合并</button>
+            <button id="deleteMarks" class="danger">删除</button>
+            <button id="addMarksToNotes"><svg class="app-icon"><use href="#icon-note"></use></svg><span>加入笔记</span></button>
+          </div>
+          <div id="highlightList" class="record-list"></div>
+        </section>
+        <section id="searchPanel" class="sidebar-panel">
+          <div class="search-box"><input id="searchInput" placeholder="搜索全文"><button id="runSearch" title="搜索" aria-label="搜索"><svg class="app-icon"><use href="#icon-arrow-circle"></use></svg></button></div>
+          <p id="searchCount" class="subtle"></p>
+          <div id="searchResults" class="record-list"></div>
+        </section>
+      </aside>
+
+      <div id="leftColumnResizer" class="column-resizer" data-resizer="left" role="separator" aria-label="调整导航栏宽度" aria-orientation="vertical"></div>
+
+      <section id="readerArea" class="reader-area">
+        <div id="emptyState" class="empty-state">
+          <div class="empty-icon">▤</div>
+          <h1>打开 PDF 开始伴读</h1>
+          <p>拖放 PDF 到这里，或点击“选择 PDF”。<br>文本页直接索引，扫描页在本机 OCR。</p>
+          <button id="emptyOpenPDF" class="primary-button">选择 PDF…</button>
+        </div>
+        <div id="viewerContainer" class="viewer-container hidden">
+          <div id="pdfViewer" class="pdfViewer"></div>
+        </div>
+        <div id="selectionToolbar" class="selection-toolbar hidden">
+          <span class="selection-label"><svg class="app-icon"><use href="#icon-highlighter"></use></svg></span>
+          <button class="color-dot yellow" data-selection-highlight="yellow" title="黄色划线"></button>
+          <button class="color-dot red" data-selection-highlight="red" title="红色划线"></button>
+          <button class="color-dot blue" data-selection-highlight="blue" title="蓝色划线"></button>
+          <button id="annotateSelection" class="selection-action annotation-action" title="批注"><svg class="app-icon"><use href="#icon-annotation"></use></svg></button>
+          <button id="copySelection" class="selection-action" title="复制"><svg class="app-icon"><use href="#icon-copy"></use></svg></button>
+          <button id="askSelection" class="selection-action ask-action" title="向 AI 提问"><svg class="app-icon"><use href="#icon-chat"></use></svg><span>提问</span></button>
+        </div>
+        <div id="annotationEditor" class="annotation-editor hidden">
+          <textarea id="annotationText" rows="2" placeholder="写下批注…"></textarea>
+          <button id="sendAnnotation">➤</button>
+        </div>
+      </section>
+
+      <div id="rightColumnResizer" class="column-resizer" data-resizer="right" role="separator" aria-label="调整 AI 栏宽度" aria-orientation="vertical"></div>
+
+      <aside id="assistantPanel" class="assistant-panel">
+        <div class="assistant-header">
+          <div class="assistant-title-row"><h2 id="assistantPanelTitle">AI 伴读</h2><span class="assistant-title-spacer"></span><button id="pasteManualOutline" class="manual-header-action hidden" title="从剪贴板粘贴"><svg class="app-icon"><use href="#icon-copy"></use></svg><span>粘贴</span></button><button id="closeManualOutline" class="icon-button hidden" title="关闭手动目录">×</button><button id="openSettings" class="icon-button" title="设置"><svg class="app-icon"><use href="#icon-gear"></use></svg></button></div>
+          <div id="apiSelectors" class="api-selectors">
+            <select id="modelSelector" title="模型"><option value="">选择模型</option></select>
+            <select id="depthSelector" title="阅读深度">
+              <option value="economical">节省</option>
+              <option value="balanced" selected>均衡</option>
+              <option value="deep">深读</option>
+            </select>
+            <button id="showUsage" class="header-usage" title="查看上一轮 Token 与缓存">上轮用量</button>
+            <span id="indexingStatus" class="indexing-status">等待文档</span>
+          </div>
+        </div>
+
+        <section id="apiAssistant" class="assistant-mode active">
+          <div class="conversation-area">
+            <div id="chatOverview" class="chat-overview"></div>
+            <div id="chatEmptyState" class="chat-empty-state"><svg class="empty-chat-icon"><use href="#icon-chat"></use></svg><h3>在原文旁边思考</h3><p>全书索引完成后即可提问。<br>问题会保留原文位置，默认只发送当前章节的相关片段。</p></div>
+            <div id="chatMessages" class="chat-messages"></div>
+          </div>
+          <div class="quick-row">
+            <button data-quick-question="解释一下">解释一下</button>
+            <button data-quick-question="联系上下文">联系上下文</button>
+            <button data-quick-question="链接资源">链接资源</button>
+            <label class="whole-book"><input id="wholeBook" type="checkbox">联系全书</label>
+          </div>
+          <div class="composer">
+            <textarea id="questionInput" placeholder="针对原文提问；Shift+Enter 换行" rows="4"></textarea>
+            <div class="composer-actions">
+              <button id="showFullQuestion"><svg class="app-icon"><use href="#icon-expand"></use></svg><span>展开</span></button>
+              <button id="speechButton" title="语音输入"><svg class="app-icon"><use href="#icon-mic"></use></svg><span>语音</span></button>
+              <span class="composer-spacer"></span>
+              <button id="cancelAnswer" class="cancel-button hidden">取消</button>
+              <button id="sendQuestion" class="send-button">发送</button>
+            </div>
+          </div>
+          <div class="chat-actions">
+            <label><input id="selectAllChats" type="checkbox">全选</label>
+            <button id="deleteChats" class="danger">删除</button>
+            <button id="addChatsToNotes"><svg class="app-icon"><use href="#icon-note"></use></svg><span>加入笔记</span></button>
+          </div>
+        </section>
+
+        <section id="manualOutlinePanel" class="assistant-mode">
+          <div class="manual-outline-body">
+            <p>每行一条“标题 + 页码”；页码可在标题前或后，行首空格表示层级。条目保留印刷页码，“PDF”栏显示实际跳转页。</p>
+            <textarea id="manualOutlineText" rows="7" placeholder="第一章 标题 1&#10;  第一节 小标题 5"></textarea>
+            <div class="manual-parse-row"><button id="parseManualOutline" class="primary-button">解析文字</button></div>
+            <div id="manualParseStatus" class="manual-parse-status"></div>
+            <div class="manual-section-title"><strong>目录条目</strong></div>
+            <div class="manual-bulk-actions" id="manualBulkActions">
+              <label><input id="selectAllManual" type="checkbox">全选</label>
+              <span id="manualSelectedCount">已选 0 项</span>
+              <select id="manualBatchLevel" aria-label="批量层级">
+                <option value="0">第 1 级</option><option value="1">第 2 级</option><option value="2">第 3 级</option>
+                <option value="3">第 4 级</option><option value="4">第 5 级</option><option value="5">第 6 级</option>
+              </select>
+              <button id="applyManualBatchLevel">应用层级</button>
+              <input id="manualPageShift" type="number" value="0" aria-label="页差" title="正数向后迁移，负数向前迁移">
+              <button id="shiftManualPages">迁移页码</button>
+              <button id="deleteManualEntries" class="danger">删除</button>
+            </div>
+            <div id="manualOutlinePreview" class="manual-preview"></div>
+            <div class="manual-footer-actions">
+              <button id="addManualEntry">＋ 添加条目</button>
+              <span></span>
+              <button id="cancelManualOutline">取消</button>
+              <button id="applyManualOutline" class="primary-button">保存目录</button>
+            </div>
+          </div>
+        </section>
+
+      </aside>
+    </main>
+
+    <footer class="status-bar">
+      <span id="statusMessage">等待打开文档</span>
+      <span class="status-spacer"></span>
+      <div class="page-navigation">
+        <button id="previousPage" title="上一页">⌃</button>
+        <label><input id="pageField" value="1" inputmode="numeric"> / <span id="pageCount">0</span></label>
+        <button id="nextPage" title="下一页">⌄</button>
+      </div>
+    </footer>
+  </div>
+
+  <div id="modalBackdrop" class="modal-backdrop hidden"></div>
+
+  <dialog id="bookshelfDialog" class="app-dialog wide-dialog">
+    <header><h2>▥ 书架</h2><button data-close-dialog="bookshelfDialog">完成</button></header>
+    <div id="bookshelfList" class="bookshelf-list"></div>
+  </dialog>
+
+  <dialog id="settingsDialog" class="app-dialog settings-dialog">
+    <header><h2>设置</h2><button data-close-dialog="settingsDialog">完成</button></header>
+    <div class="settings-tabs" role="tablist">
+      <button class="active" data-settings-tab="api" role="tab">API</button>
+      <button data-settings-tab="obsidian" role="tab">Obsidian</button>
+    </div>
+    <div class="settings-body">
+      <section class="settings-panel active" data-settings-panel="api">
+        <div class="connection-mode" role="group" aria-label="连接方式">
+          <button class="active" data-connection-mode="official">自动连接</button>
+          <button data-connection-mode="custom">自定义 API</button>
+        </div>
+        <p id="connectionHelp" class="subtle">支持官方 API Key 及已内置的主流服务商。</p>
+        <div id="customConnectionFields" class="custom-connection-fields hidden">
+          <label>连接信息<textarea id="connectionJSON" rows="3" placeholder='{"_type":"newapi_channel_conn","key":"sk-*","url":"https://example.com"}'></textarea></label>
+          <label>Base URL<input id="baseURL" placeholder="https://api.example.com/v1"></label>
+          <button id="parseConnection">识别并填充</button>
+        </div>
+        <label>API Key<input id="apiKey" type="password" autocomplete="off" placeholder="粘贴 API Key"></label>
+        <div class="settings-row"><button id="validateAPI" class="primary-button">验证并保存</button></div>
+        <p id="connectionStatus" class="connection-status"><span class="status-dot"></span><span>未连接</span></p>
+        <details><summary>API 兼容说明</summary><div id="apiCompatibility" class="compatibility-copy"></div></details>
+      </section>
+      <section class="settings-panel" data-settings-panel="obsidian">
+        <label>Obsidian Vault<div class="path-picker"><input id="vaultPath" readonly><button id="chooseVault">选择…</button></div></label>
+        <label>笔记目录<input id="vaultFolder" value="Reading Companion"></label>
+        <p class="subtle">目录、划线、批注和 AI 对话会写入当前书籍的 Markdown 笔记。</p>
+      </section>
+    </div>
+  </dialog>
+
+  <dialog id="notesDialog" class="app-dialog wide-dialog">
+    <header><h2>笔记</h2><button data-close-dialog="notesDialog">完成</button></header>
+    <div class="notes-body">
+      <section class="notes-group">
+        <h3>Obsidian</h3>
+        <div class="notes-vault-row"><span id="notesVaultStatus">尚未连接 Vault</span><span class="notes-spacer"></span><button id="notesChooseVault">选择 Vault…</button></div>
+        <div class="notes-command-row"><button id="notesCreateNotebook"><svg class="app-icon"><use href="#icon-book-closed"></use></svg><span>创建笔记本</span></button><button id="notesAddOutline"><svg class="app-icon"><use href="#icon-note"></use></svg><span>添加目录</span></button><button id="notesOpenNotebook"><svg class="app-icon"><use href="#icon-open-note"></use></svg><span>打开笔记</span></button><span class="notes-spacer"></span><button id="notesOpenSettings"><svg class="app-icon"><use href="#icon-gear"></use></svg>设置</button></div>
+      </section>
+      <section class="notes-group">
+        <h3>加入已有内容</h3>
+        <div class="notes-content-row"><span>划线与批注</span><span id="pendingMarksCount" class="subtle"></span><span class="notes-spacer"></span><button id="notesSelectPendingMarks">全选未加入</button><button id="notesAddMarks"><svg class="app-icon"><use href="#icon-note"></use></svg><span>加入笔记</span></button></div>
+        <div class="notes-content-row"><span>AI 对话</span><span id="pendingChatsCount" class="subtle"></span><span class="notes-spacer"></span><button id="notesSelectPendingChats">全选未加入</button><button id="notesDeleteChats" class="danger">删除</button></div>
+        <div class="notes-options">
+          <label><input type="radio" name="chatExport" value="original" checked>保留原文</label>
+          <label><input type="radio" name="chatExport" value="condensed">原文 30%</label>
+          <label><input id="collapseConversation" type="checkbox">默认折叠</label>
+          <span class="notes-spacer"></span><button id="notesAddChats"><svg class="app-icon"><use href="#icon-note"></use></svg><span>加入笔记</span></button>
+        </div>
+      </section>
+      <div class="notes-summary" id="notesSummary"></div>
+    </div>
+  </dialog>
+
+  <dialog id="questionEditorDialog" class="app-dialog question-editor-dialog">
+    <header><h2>完整问题</h2><button data-close-dialog="questionEditorDialog">关闭</button></header>
+    <div class="question-editor-body">
+      <textarea id="fullQuestionInput" rows="16" placeholder="输入问题"></textarea>
+      <div class="question-editor-actions"><button id="useFullQuestion">保留修改</button><button id="sendFullQuestion" class="primary-button">发送</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="summaryDialog" class="app-dialog wide-dialog">
+    <header><h2 id="summaryDialogTitle">章节概要</h2><button data-close-dialog="summaryDialog">关闭</button></header>
+    <div id="summaryContent" class="summary-content"></div>
+  </dialog>
+
+  <dialog id="usageDialog" class="app-dialog">
+    <header><h2>上轮用量</h2><button data-close-dialog="usageDialog">关闭</button></header>
+    <div id="usageContent" class="usage-content"></div>
+  </dialog>
+
+  <script type="module" src="./app.mjs"></script>
+</body>
+</html>

@@ -1,0 +1,73 @@
+{
+  "name": "reading-companion-windows",
+  "version": "0.43.18",
+  "edition": "public",
+  "description": "Reading Companion for Windows",
+  "main": "src/main/main.cjs",
+  "author": "Reading Companion contributors",
+  "license": "MIT",
+  "scripts": {
+    "vendor": "node scripts/copy-vendor.cjs",
+    "start": "pnpm run vendor && electron .",
+    "test": "node --test tests/*.test.cjs",
+    "pack:win": "pnpm run vendor && electron-builder --win dir --x64",
+    "dist:win": "pnpm run vendor && electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "marked": "17.0.3",
+    "pdfjs-dist": "6.2.108",
+    "tesseract.js": "7.0.0"
+  },
+  "devDependencies": {
+    "cross-env": "10.1.0",
+    "electron": "43.4.1",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.ljg.reading-companion.open.windows",
+    "productName": "Reading Companion Open",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/tesseract.js/**",
+      "node_modules/tesseract.js-core/**"
+    ],
+    "files": [
+      "src/**/*",
+      "resources/**/*",
+      "!resources/tessdata/**/*",
+      "package.json",
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md",
+      "node_modules/tesseract.js/**/*",
+      "node_modules/tesseract.js-core/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/tessdata",
+        "to": "tessdata"
+      },
+      {
+        "from": "resources/windows-speech.ps1",
+        "to": "windows-speech.ps1"
+      }
+    ],
+    "win": {
+      "icon": "resources/AppIcon-1024.png",
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "Reading-Companion-Open-${version}-Windows-${arch}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Reading Companion Open"
+    },
+    "directories": {
+      "output": "dist",
+      "buildResources": "resources"
+    }
+  }
+}

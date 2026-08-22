@@ -1,0 +1,18 @@
+Reading Companion Open 安装说明
+
+1. 将“Reading Companion Open”拖入旁边的“Applications”文件夹。它与原版 Reading Companion 相互独立，可以同时保留。
+2. 第一次打开时，如果 macOS 阻止运行，请在 Finder 中右键应用并选择“打开”。
+3. 当前安装包使用本地临时签名，尚未使用 Developer ID 签名和 Apple 公证。
+
+首次使用：
+1. 自行购买受支持平台的 API 额度，在设置 > AI 输入密钥并点“识别并保存”；平台会自动识别。
+2. 下载并打开 Obsidian，先创建/打开一个 Vault；再在设置 > Obsidian 选择该 Vault 根目录并设置笔记目录。
+3. 导入 PDF，等待 OCR/索引完成；在左侧目录中识别并校对标题、层级和页码跳转。
+4. 目录栏底部依次点击“创建笔记本”“添加目录”“打开笔记本”。
+
+增强目录识别引擎已完整包含在应用中，无需安装 Python 或另行下载模型。
+
+DMG 内附 README、快速上手、故障排查、隐私与第三方声明。
+
+系统要求：macOS 14 或更高版本
+处理器：Apple Silicon（M1 或更新）
