@@ -6,8 +6,8 @@
 
 | 平台 | 版本 | 系统 |
 | --- | --- | --- |
-| macOS | 0.55.3 | macOS 14+，Apple Silicon |
-| Windows | 0.43.23 | Windows 10/11，x64 |
+| macOS | 0.55.6 | macOS 14+，Apple Silicon |
+| Windows | 0.44.3 | Windows 10/11，x64 |
 
 安装包在 [Latest Release](https://github.com/fliname/Reading-Companion-Open/releases/latest) 下载。
 
