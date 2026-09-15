@@ -1,0 +1,43 @@
+// Historical tests for the removed optional DoclingTOCJSONParser.
+// Preserved verbatim; this parser is not part of the current public macOS target.
+
+    @Test func doclingLayoutBlocksRemainSeparateTOCEntries() throws {
+        let json = """
+        {
+          "texts": [
+            {"label":"text","text":"目","prov":[{"page_no":1}]},
+            {"label":"text","text":"录","prov":[{"page_no":1}]},
+            {"label":"text","text":"从物到非物/001","prov":[{"page_no":1}]},
+            {"label":"text","text":"从占有到体验 /019","prov":[{"page_no":1}]},
+            {"label":"text","text":"智能手机 /029","prov":[{"page_no":1}]},
+            {"label":"text","text":"自拍；049","prov":[{"page_no":1}]},
+            {"label":"text","text":"物的脊背 1084","prov":[{"page_no":1}]},
+            {"label":"text","text":"鬼魂1092","prov":[{"page_no":1}]}
+          ]
+        }
+        """
+        let pages = try DoclingTOCJSONParser.parse(Data(json.utf8), sourcePageIndices: [2])
+        #expect(pages.count == 1)
+        #expect(pages[0].pageIndex == 2)
+        let entries = TOCReliableParser.parse(pages[0].text)
+        #expect(entries.map(\.title) == ["从物到非物", "从占有到体验", "智能手机", "自拍", "物的脊背", "鬼魂"])
+        #expect(entries.compactMap(\.printedPage) == [1, 19, 29, 49, 1_084, 1_092])
+    }
+
+    @Test func doclingPageNumbersMapBackToOriginalPDFPages() throws {
+        let json = """
+        {
+          "texts": [
+            {"label":"section_header","text":"第一章 起点 1","prov":[{"page_no":1}]},
+            {"label":"list_item","text":"1.1 问题 3","prov":[{"page_no":1}]},
+            {"label":"section_header","text":"第二章 推进 18","prov":[{"page_no":2}]},
+            {"label":"page_footer","text":"22","prov":[{"page_no":2}]}
+          ]
+        }
+        """
+        let pages = try DoclingTOCJSONParser.parse(Data(json.utf8), sourcePageIndices: [21, 22])
+        #expect(pages.map(\.pageIndex) == [21, 22])
+        #expect(pages[0].text.contains("第一章 起点 1"))
+        #expect(pages[1].text == "第二章 推进 18")
+    }
+

@@ -25,8 +25,10 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 install -m 755 .build/release/ReadingCompanion "$MACOS_DIR/ReadingCompanion"
 install -m 644 Resources/Info.plist "$CONTENTS_DIR/Info.plist"
 install -m 644 Resources/AppIcon.icns "$RESOURCES_DIR/AppIcon.icns"
-
-"$SCRIPT_DIR/bundle-enhanced-toc.sh" "$RESOURCES_DIR/EnhancedTOC"
+mkdir -p "$RESOURCES_DIR/BookConverter"
+install -m 755 Resources/BookConverter/mobitool "$RESOURCES_DIR/BookConverter/mobitool"
+install -m 755 Resources/BookConverter/libmobi.0.dylib "$RESOURCES_DIR/BookConverter/libmobi.0.dylib"
+install -m 644 Resources/BookConverter/COPYING.LGPL-3.0 "$RESOURCES_DIR/BookConverter/COPYING.LGPL-3.0"
 
 codesign --force --deep --sign - "$APP_DIR"
 echo "$APP_DIR"

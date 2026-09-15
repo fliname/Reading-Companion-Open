@@ -13,10 +13,39 @@ struct ManualOutlinePreview {
     var restartAfter: Int?
 }
 
+enum ReaderDocumentKind: String {
+    case pdf = "PDF"
+    case epub = "EPUB"
+    case azw3 = "AZW3"
+    case mobi = "MOBI"
+
+    init?(url: URL) {
+        switch url.pathExtension.lowercased() {
+        case "pdf": self = .pdf
+        case "epub": self = .epub
+        case "azw3": self = .azw3
+        case "mobi": self = .mobi
+        default: return nil
+        }
+    }
+}
+
+private final class DroppedItemProvider: @unchecked Sendable {
+    let value: NSItemProvider
+
+    init(_ value: NSItemProvider) {
+        self.value = value
+    }
+}
+
 @MainActor
 final class ReaderModel: ObservableObject {
     @Published var document: PDFDocument?
+    @Published var reflowBook: ReflowBook?
     @Published var documentURL: URL?
+    @Published private(set) var documentKind: ReaderDocumentKind?
+    @Published private(set) var bookCategory: BookCategory?
+    @Published var pendingImportURL: URL?
     @Published var documentTitle = "未打开文档"
     @Published var selectedSidebar: SidebarSection = .outline
     @Published var outline: [OutlineEntry] = []
@@ -26,6 +55,11 @@ final class ReaderModel: ObservableObject {
     @Published var searchResults: [SearchRecord] = []
     @Published var searchQuery = ""
     @Published var searchHighlightQuery = ""
+    @Published private(set) var searchNavigationCommand = 0
+    private(set) var searchNavigationTarget: SearchRecord?
+    @Published var characters: [BookCharacter] = []
+    @Published private(set) var characterHighlightsEnabled = true
+    @Published var characterManagementVisible = false
     @Published var displayMode: ReaderDisplayMode = .single
     @Published var fitMode: ReaderFitMode = .page
     @Published var zoomScale = 1.0
@@ -37,10 +71,27 @@ final class ReaderModel: ObservableObject {
         didSet { UserDefaults.standard.set(highlightTint.rawValue, forKey: "highlightTint") }
     }
     @Published var currentPageIndex = 0
+    @Published var documentStateLoaded = false
+    var reflowReadingPosition: ReflowReadingPosition?
+    @Published var pdfTwoPages = false
     @Published var navigationTarget: Int?
-    @Published var leftSidebarVisible = true
-    @Published var assistantVisible = true
-    @Published var statusMessage = "打开一份 PDF 开始阅读"
+    @Published var reflowPageNumber = 1
+    @Published var reflowPageCount = 1
+    @Published var reflowSpreadCount = 1
+    @Published var reflowPageMode = ReflowPageMode(
+        rawValue: UserDefaults.standard.string(forKey: "reflowPageMode") ?? ""
+    ) ?? .automatic {
+        didSet { UserDefaults.standard.set(reflowPageMode.rawValue, forKey: "reflowPageMode") }
+    }
+    @Published private(set) var reflowTurnCommand = 0
+    private(set) var reflowTurnDirection = 0
+    @Published var leftSidebarVisible = true {
+        didSet { if zoomLocked && leftSidebarVisible != oldValue { leftSidebarVisible = oldValue } }
+    }
+    @Published var assistantVisible = true {
+        didSet { if zoomLocked && assistantVisible != oldValue { assistantVisible = oldValue } }
+    }
+    @Published var statusMessage = "打开一本电子书开始阅读"
     @Published var noteFeedbackMessage: String?
     @Published var errorMessage: String?
     @Published var pendingAnnotation: HighlightRecord?
@@ -48,10 +99,10 @@ final class ReaderModel: ObservableObject {
     @Published var textChunks: [TextChunk] = []
     @Published var indexingProgress = 0.0
     @Published var indexingStatus = "等待文档"
+    @Published var isImportingDocument = false
     @Published var outlineStatus = "等待文档"
     @Published var isLocatingTOC = false
     @Published var isRefiningOutline = false
-    @Published var enhancedTOCInstalled = EnhancedTOCService.isInstalled
     @Published var outlineRefinedByAI = false
     @Published var outlineWasManuallyEdited = false
     @Published private(set) var embeddedOutline: [OutlineEntry] = []
@@ -60,9 +111,21 @@ final class ReaderModel: ObservableObject {
     @Published var isExportingChatNote = false
     @Published var chapterSummaries: [String: String] = [:]
     @Published var generatingChapterSummaryKeys: Set<String> = []
+    @Published var pageRangeSummaries: [PageRangeSummaryRecord] = []
+    @Published var summaryStartPage = ""
+    @Published var summaryEndPage = ""
+    var summaryDraftAnchors: [ReflowTextAnchor]?
+    @Published var outlineDisplayPages: [UUID: Int] = [:]
+    var outlineReflowAnchors: [UUID: ReflowTextAnchor] = [:]
+    @Published var reflowAnchorTarget: ReflowTextAnchor?
+    @Published var reflowAnchorCommand = 0
+    @Published private(set) var isGeneratingPageRangeSummary = false
+    @Published private(set) var pageRangeSummaryRequest: PageRangeSummaryRequest?
     @Published var assistantDraft = ""
     @Published var assistantUsesWebSearch = false
     @Published var assistantUsesWholeBook = false
+    @Published var assistantUsesLJGReadSkill = true
+    @Published private(set) var aiCompanionMode: AICompanionMode = .academic
     @Published var aiProvider = AIProvider(
         rawValue: UserDefaults.standard.string(forKey: "aiProvider") ?? ""
     ) ?? .openAI
@@ -93,12 +156,15 @@ final class ReaderModel: ObservableObject {
     }
     @Published var obsidianNoteURL: URL?
     @Published var cachedProjects: [CachedProject] = []
+    @Published var bookshelfFolders: [BookshelfFolder] = []
 
     private let openAI = OpenAIService()
-    private let enhancedTOC = EnhancedTOCService()
     private let apiKeyStore = APIKeyStore()
     private let obsidian = ObsidianService()
     private var indexingTask: Task<Void, Never>?
+    private var importTask: Task<Void, Never>?
+    private var coverBackfillTask: Task<Void, Never>?
+    private var openRequestID = UUID()
     private var answerTask: Task<Void, Never>?
     private var activeAnswerRequestID: UUID?
     private var pendingQuestionTurnID: UUID?
@@ -134,6 +200,9 @@ final class ReaderModel: ObservableObject {
     }
     private var highlightUndoStack: [HighlightChange] = []
     private var highlightRedoStack: [HighlightChange] = []
+    private var characterOccurrenceCursor: [UUID: Int] = [:]
+    private var activePageRangeSummaryRequestID: UUID?
+    private var persistenceTask: Task<Void, Never>?
 
     var pageCount: Int { document?.pageCount ?? 0 }
     var hasEmbeddedOutline: Bool { !embeddedOutline.isEmpty }
@@ -181,28 +250,140 @@ final class ReaderModel: ObservableObject {
 
     func presentOpenPanel() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.pdf]
+        panel.allowedContentTypes = [.pdf, Self.epubContentType, Self.azw3ContentType, Self.mobiContentType]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        panel.message = "选择要伴读的 PDF"
+        panel.message = "选择要伴读的 PDF、EPUB、AZW3 或 MOBI"
         if panel.runModal() == .OK, let url = panel.url {
-            open(url)
+            beginImport(url)
         }
     }
 
-    func open(_ url: URL) {
-        guard url.pathExtension.lowercased() == "pdf" else {
-            errorMessage = "目前只支持 PDF 文件。"
+    func beginImport(_ url: URL) {
+        guard ReaderDocumentKind(url: url) != nil else {
+            errorMessage = "目前支持 PDF、EPUB、AZW3 和 MOBI 文件。"
             return
         }
-        guard let loaded = PDFDocument(url: url) else {
-            errorMessage = "无法打开这份 PDF。文件可能损坏、受密码保护或无读取权限。原文件没有被修改。"
+        pendingImportURL = url.standardizedFileURL
+    }
+
+    func cancelPendingImport() {
+        pendingImportURL = nil
+    }
+
+    func confirmPendingImport(as category: BookCategory) {
+        guard let url = pendingImportURL else { return }
+        pendingImportURL = nil
+        open(url, category: category)
+    }
+
+    func openExisting(_ url: URL) {
+        Task {
+            let saved = await DocumentStore.shared.load(for: url).bookCategory
+            await MainActor.run {
+                if let saved { self.open(url, category: saved) }
+                else { self.beginImport(url) }
+            }
+        }
+    }
+
+    func open(_ url: URL, category: BookCategory = .nonfiction) {
+        guard let kind = ReaderDocumentKind(url: url) else {
+            errorMessage = "目前支持 PDF、EPUB、AZW3 和 MOBI 文件。"
             return
         }
+        importTask?.cancel()
+        openRequestID = UUID()
+        let requestID = openRequestID
+        switch kind {
+        case .pdf:
+            isImportingDocument = false
+            guard let loaded = PDFDocument(url: url) else {
+                errorMessage = "无法打开这份 PDF。文件可能损坏、受密码保护或无读取权限。原文件没有被修改。"
+                return
+            }
+            installDocument(
+                loaded,
+                sourceURL: url,
+                kind: .pdf,
+                title: loaded.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String
+                    ?? url.deletingPathExtension().lastPathComponent,
+                sourceOutline: OutlineBuilder.entries(for: loaded),
+                reflowBook: nil,
+                coverPNGData: nil,
+                category: category
+            )
+        case .epub, .azw3, .mobi:
+            isImportingDocument = true
+            indexingProgress = 0.02
+            statusMessage = kind == .epub
+                ? "正在解析 EPUB 目录与可重排正文…"
+                : "正在解码 \(kind.rawValue) 并生成可重排正文…"
+            indexingStatus = "正在读取 \(kind.rawValue) 文件…"
+            importTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    let progress: @MainActor (Double, String) -> Void = { [weak self] value, message in
+                        guard let self, self.openRequestID == requestID else { return }
+                        self.indexingProgress = min(max(value, 0.02), 0.99)
+                        self.indexingStatus = message
+                        self.statusMessage = message
+                    }
+                    let result = kind == .epub
+                        ? try await EPUBImporter.importBook(at: url, progress: progress)
+                        : try await KindleBookImporter.importBook(at: url, progress: progress)
+                    guard !Task.isCancelled, self.openRequestID == requestID else { return }
+                    self.installDocument(
+                        result.document,
+                        sourceURL: url,
+                        kind: kind,
+                        title: result.title,
+                        sourceOutline: result.outline,
+                        reflowBook: result.reflowBook,
+                        coverPNGData: result.coverPNGData,
+                        category: category
+                    )
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard self.openRequestID == requestID else { return }
+                    self.isImportingDocument = false
+                    self.indexingStatus = "\(kind.rawValue) 导入失败"
+                    self.statusMessage = "\(kind.rawValue) 导入失败"
+                    self.errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func installDocument(
+        _ loaded: PDFDocument,
+        sourceURL url: URL,
+        kind: ReaderDocumentKind,
+        title: String,
+        sourceOutline: [OutlineEntry],
+        reflowBook importedReflowBook: ReflowBook?,
+        coverPNGData preferredCoverPNGData: Data?,
+        category requestedCategory: BookCategory
+    ) {
         cancelActiveAnswer(restoreQuestion: false)
         indexingTask?.cancel()
+        isImportingDocument = false
+        persist()
+        documentStateLoaded = false
+        reflowReadingPosition = nil
         document = loaded
+        reflowBook = importedReflowBook
+        reflowPageNumber = 1
+        reflowPageCount = 1
+        reflowSpreadCount = 1
+        zoomScale = 1.0
+        fitMode = importedReflowBook == nil ? .page : .custom
+        zoomLocked = false
         documentURL = url
+        documentKind = kind
+        bookCategory = requestedCategory
+        aiCompanionMode = requestedCategory.companionMode
         pageTexts = []
         tocPageIndices = []
         textChunks = []
@@ -211,43 +392,89 @@ final class ReaderModel: ObservableObject {
         searchResults = []
         searchQuery = ""
         searchHighlightQuery = ""
+        searchNavigationTarget = nil
+        characters = []
+        characterHighlightsEnabled = true
+        assistantUsesLJGReadSkill = true
+        characterManagementVisible = false
+        characterOccurrenceCursor = [:]
         chapterSummaries = [:]
         generatingChapterSummaryKeys = []
+        pageRangeSummaries = []
+        summaryStartPage = ""
+        summaryEndPage = ""
+        summaryDraftAnchors = nil
+        outlineDisplayPages = [:]
+        outlineReflowAnchors = [:]
+        reflowAnchorTarget = nil
+        isGeneratingPageRangeSummary = false
+        pageRangeSummaryRequest = nil
+        activePageRangeSummaryRequestID = nil
         highlightUndoStack = []
         highlightRedoStack = []
         outlineRefinedByAI = false
         outlineWasManuallyEdited = false
         preparedQuestionBase = nil
         isRefiningOutline = false
-        documentTitle = loaded.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String
-            ?? url.deletingPathExtension().lastPathComponent
-        embeddedOutline = OutlineBuilder.entries(for: loaded)
+        documentTitle = title
+        embeddedOutline = sourceOutline
         outline = embeddedOutline
         if outline.isEmpty {
-            outlineStatus = "PDF 无自带目录"
+            outlineStatus = "\(kind.rawValue) 无自带目录"
         } else {
-            outlineStatus = "PDF 自带目录 · \(outline.count) 项"
+            outlineStatus = "\(kind.rawValue) 自带目录 · \(outline.count) 项"
         }
-        statusMessage = "文档已打开，正在建立全文索引"
+        statusMessage = kind != .pdf
+            ? "\(kind.rawValue) 已进入流式阅读，正在建立全文索引"
+            : "文档已打开，正在建立全文索引"
 
+        let installationID = openRequestID
+        let coverData = preferredCoverPNGData
+            ?? BookCoverRenderer.pngData(document: loaded, title: title)
+        let previousSave = persistenceTask
         Task {
-            await DocumentStore.shared.registerProject(url: url, title: documentTitle)
+            await previousSave?.value
             var state = await DocumentStore.shared.load(for: url)
+            let categoryWasMissing = state.bookCategory == nil
+            let fixedCategory = state.bookCategory ?? requestedCategory
+            state.bookCategory = fixedCategory
+            let savedCharacters = state.characters ?? []
+            let normalizedCharacters = fixedCategory == .fiction
+                ? Self.assignUniqueCharacterColors(savedCharacters)
+                : []
+            let characterColorsWereMigrated = fixedCategory == .fiction && normalizedCharacters != savedCharacters
+            if fixedCategory == .fiction { state.characters = normalizedCharacters }
+            await DocumentStore.shared.registerProject(
+                url: url,
+                title: documentTitle,
+                category: fixedCategory,
+                coverPNGData: coverData
+            )
             let outlineInvalidated = state.invalidateAutomaticOutline(olderThan: outlineAlgorithmVersion)
             let summariesInvalidated = state.invalidateChapterSummaries(olderThan: chapterSummaryAlgorithmVersion)
-            if outlineInvalidated || summariesInvalidated {
+            if categoryWasMissing || characterColorsWereMigrated || outlineInvalidated || summariesInvalidated {
                 try? await DocumentStore.shared.save(state, for: url)
             }
             let projects = await DocumentStore.shared.cachedProjects()
             await MainActor.run {
-                guard documentURL?.standardizedFileURL == url.standardizedFileURL else { return }
+                guard openRequestID == installationID, documentURL?.standardizedFileURL == url.standardizedFileURL else { return }
                 cachedProjects = projects
+                bookCategory = fixedCategory
+                aiCompanionMode = fixedCategory.companionMode
                 currentPageIndex = min(state.lastPageIndex, max(loaded.pageCount - 1, 0))
                 navigationTarget = currentPageIndex
+                reflowReadingPosition = state.reflowReadingPosition
+                if importedReflowBook != nil, let saved = state.reflowReadingPosition {
+                    zoomScale = min(max(saved.scale, 0.65), 2.25)
+                }
                 bookmarks = state.bookmarks
                 highlights = state.highlights
+                characters = normalizedCharacters
+                characterHighlightsEnabled = state.characterHighlightsEnabled ?? true
+                assistantUsesLJGReadSkill = state.ljgReadSkillEnabled ?? true
                 chatTurns = state.chats
                 chapterSummaries = state.chapterSummaries ?? [:]
+                pageRangeSummaries = state.pageRangeSummaries ?? []
                 answerCache = state.answerCache ?? [:]
                 if state.outlineWasManuallyEdited == true,
                    let savedOutline = state.outline,
@@ -263,6 +490,7 @@ final class ReaderModel: ObservableObject {
                     outlineStatus = "目录已恢复"
                 }
                 refreshEmbeddedOutlineStatus()
+                documentStateLoaded = true
                 startIndexing()
             }
         }
@@ -271,22 +499,154 @@ final class ReaderModel: ObservableObject {
     func refreshCachedProjects() {
         Task {
             let projects = await DocumentStore.shared.cachedProjects()
+            let folders = await DocumentStore.shared.bookshelfFolders()
+            await MainActor.run {
+                cachedProjects = projects
+                bookshelfFolders = folders
+            }
+            startCoverBackfillIfNeeded(projects)
+        }
+    }
+
+    private func startCoverBackfillIfNeeded(_ projects: [CachedProject]) {
+        guard coverBackfillTask == nil else { return }
+        let missing = projects.filter { project in
+            guard project.isAvailable else { return false }
+            let hasCover = project.coverPath.map { FileManager.default.fileExists(atPath: $0) } ?? false
+            return !hasCover || project.coverVersion != BookCoverRenderer.version
+        }
+        guard !missing.isEmpty else { return }
+        coverBackfillTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { coverBackfillTask = nil }
+            for project in missing {
+                guard !Task.isCancelled else { return }
+                let data: Data?
+                switch ReaderDocumentKind(url: project.sourceURL) {
+                case .pdf:
+                    data = PDFDocument(url: project.sourceURL).flatMap {
+                        BookCoverRenderer.pngData(document: $0, title: project.title)
+                    }
+                case .epub:
+                    data = await EPUBImporter.coverPNGData(at: project.sourceURL, title: project.title)
+                case .azw3, .mobi, .none:
+                    data = BookCoverRenderer.pngData(imageData: nil, title: project.title)
+                }
+                if let data {
+                    await DocumentStore.shared.updateProjectCover(url: project.sourceURL, coverPNGData: data)
+                }
+            }
+            cachedProjects = await DocumentStore.shared.cachedProjects()
+        }
+    }
+
+    func createBookshelfFolder(named title: String) {
+        Task {
+            _ = await DocumentStore.shared.createBookshelfFolder(title: title)
+            let folders = await DocumentStore.shared.bookshelfFolders()
+            await MainActor.run { bookshelfFolders = folders }
+        }
+    }
+
+    func renameBookshelfFolder(_ folder: BookshelfFolder, to title: String) {
+        Task {
+            await DocumentStore.shared.renameBookshelfFolder(folder, title: title)
+            let folders = await DocumentStore.shared.bookshelfFolders()
+            await MainActor.run { bookshelfFolders = folders }
+        }
+    }
+
+    func deleteBookshelfFolder(_ folder: BookshelfFolder) {
+        Task {
+            await DocumentStore.shared.deleteBookshelfFolder(folder)
+            let projects = await DocumentStore.shared.cachedProjects()
+            let folders = await DocumentStore.shared.bookshelfFolders()
+            await MainActor.run {
+                cachedProjects = projects
+                bookshelfFolders = folders
+            }
+        }
+    }
+
+    func moveCachedProject(_ project: CachedProject, to folderID: UUID?) {
+        Task {
+            await DocumentStore.shared.moveProject(project, to: folderID)
+            let projects = await DocumentStore.shared.cachedProjects()
             await MainActor.run { cachedProjects = projects }
         }
     }
 
+    func setCachedProjects(
+        _ projects: [CachedProject],
+        in folderID: UUID,
+        included: Bool,
+        folderTitle: String? = nil
+    ) {
+        let paths = Set(projects.map(\.sourcePath))
+        for index in cachedProjects.indices where paths.contains(cachedProjects[index].sourcePath) {
+            var memberships = cachedProjects[index].assignedFolderIDs
+            if included { memberships.insert(folderID) } else { memberships.remove(folderID) }
+            cachedProjects[index].folderID = nil
+            cachedProjects[index].folderIDs = Array(memberships)
+        }
+        if let folderTitle {
+            statusMessage = included
+                ? "已将 \(projects.count) 本书加入“\(folderTitle)”"
+                : "已将 \(projects.count) 本书移出“\(folderTitle)”"
+        }
+        Task {
+            await DocumentStore.shared.setProjects(projects, in: folderID, included: included)
+            let refreshed = await DocumentStore.shared.cachedProjects()
+            await MainActor.run { cachedProjects = refreshed }
+        }
+    }
+
+    func setCachedProjects(_ projects: [CachedProject], category: BookCategory) {
+        guard !projects.isEmpty else { return }
+        let paths = Set(projects.map(\.sourcePath))
+        for index in cachedProjects.indices where paths.contains(cachedProjects[index].sourcePath) {
+            cachedProjects[index].category = category
+        }
+        if let currentPath = documentURL?.standardizedFileURL.path, paths.contains(currentPath) {
+            bookCategory = category
+            aiCompanionMode = category.companionMode
+            if category != .fiction {
+                if selectedSidebar == .characters { selectedSidebar = .outline }
+                characterManagementVisible = false
+            }
+        }
+        statusMessage = "已将 \(projects.count) 本书设为\(category.rawValue)"
+        Task {
+            await DocumentStore.shared.setProjects(projects, category: category)
+            let refreshed = await DocumentStore.shared.cachedProjects()
+            await MainActor.run { cachedProjects = refreshed }
+        }
+    }
+
     func deleteCachedProject(_ project: CachedProject) {
-        let url = project.sourceURL.standardizedFileURL
-        if documentURL?.standardizedFileURL.path == url.path {
+        deleteCachedProjects([project])
+    }
+
+    func deleteCachedProjects(_ projects: [CachedProject]) {
+        guard !projects.isEmpty else { return }
+        let paths = Set(projects.map { $0.sourceURL.standardizedFileURL.path })
+        for project in projects where ReaderDocumentKind(url: project.sourceURL) != .pdf {
+            EPUBImporter.removeCache(for: project.sourceURL.standardizedFileURL)
+        }
+        if let currentPath = documentURL?.standardizedFileURL.path, paths.contains(currentPath) {
             resetOpenDocument()
         }
         Task {
             do {
-                try await DocumentStore.shared.deleteProject(for: url)
-                let projects = await DocumentStore.shared.cachedProjects()
+                for project in projects {
+                    try await DocumentStore.shared.deleteProject(for: project.sourceURL.standardizedFileURL)
+                }
+                let refreshed = await DocumentStore.shared.cachedProjects()
                 await MainActor.run {
-                    cachedProjects = projects
-                    statusMessage = "已删除“\(project.title)”的缓存；可重新导入 PDF"
+                    cachedProjects = refreshed
+                    statusMessage = projects.count == 1
+                        ? "已删除“\(projects[0].title)”的缓存；可重新导入文档"
+                        : "已删除 \(projects.count) 本书的缓存；原始文档未删除"
                 }
             } catch {
                 await MainActor.run {
@@ -298,13 +658,23 @@ final class ReaderModel: ObservableObject {
 
     private func resetOpenDocument() {
         cancelActiveAnswer(restoreQuestion: false)
+        importTask?.cancel()
+        importTask = nil
         indexingTask?.cancel()
         indexingTask = nil
+        documentStateLoaded = false
+        reflowReadingPosition = nil
         document = nil
+        reflowBook = nil
         documentURL = nil
+        documentKind = nil
+        bookCategory = nil
         documentTitle = "未打开文档"
         currentPageIndex = 0
         navigationTarget = nil
+        reflowPageNumber = 1
+        reflowPageCount = 1
+        reflowSpreadCount = 1
         outline = []
         embeddedOutline = []
         bookmarks = []
@@ -314,11 +684,27 @@ final class ReaderModel: ObservableObject {
         searchResults = []
         searchQuery = ""
         searchHighlightQuery = ""
+        searchNavigationTarget = nil
+        characters = []
+        characterHighlightsEnabled = true
+        assistantUsesLJGReadSkill = true
+        characterManagementVisible = false
+        characterOccurrenceCursor = [:]
         textChunks = []
         pageTexts = []
         tocPageIndices = []
         chapterSummaries = [:]
         generatingChapterSummaryKeys = []
+        pageRangeSummaries = []
+        summaryStartPage = ""
+        summaryEndPage = ""
+        summaryDraftAnchors = nil
+        outlineDisplayPages = [:]
+        outlineReflowAnchors = [:]
+        reflowAnchorTarget = nil
+        isGeneratingPageRangeSummary = false
+        pageRangeSummaryRequest = nil
+        activePageRangeSummaryRequestID = nil
         answerCache = [:]
         assistantDraft = ""
         preparedQuestionBase = nil
@@ -327,20 +713,107 @@ final class ReaderModel: ObservableObject {
         derivedCacheNeedsSave = false
         indexingProgress = 0
         indexingStatus = "等待文档"
+        isImportingDocument = false
         outlineStatus = "等待文档"
-        statusMessage = "项目缓存已删除，可重新导入 PDF"
+        statusMessage = "项目缓存已删除，可重新导入文档"
     }
 
     func acceptDroppedURLs(_ providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.pdf.identifier) }) else {
+        guard let provider = providers.first(where: {
+            $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+                || $0.hasItemConformingToTypeIdentifier(UTType.pdf.identifier)
+                || $0.hasItemConformingToTypeIdentifier(Self.epubContentType.identifier)
+                || $0.hasItemConformingToTypeIdentifier(Self.azw3ContentType.identifier)
+                || $0.hasItemConformingToTypeIdentifier(Self.mobiContentType.identifier)
+        }) else {
             return false
         }
-        provider.loadItem(forTypeIdentifier: UTType.pdf.identifier, options: nil) { [weak self] item, _ in
-            let url = item as? URL ?? (item as? Data).flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
-            guard let url else { return }
-            Task { @MainActor in self?.open(url) }
+
+        let openDroppedURL: @Sendable (URL?) -> Void = { [weak self] url in
+            guard let url, ReaderDocumentKind(url: url) != nil else { return }
+            Task { @MainActor in self?.beginImport(url) }
+        }
+        let providerBox = DroppedItemProvider(provider)
+        let epubTypeIdentifier = Self.epubContentType.identifier
+        let azw3TypeIdentifier = Self.azw3ContentType.identifier
+        let mobiTypeIdentifier = Self.mobiContentType.identifier
+        let pdfTypeIdentifier = UTType.pdf.identifier
+        let loadTypedRepresentation: @Sendable () -> Void = {
+            let candidates = [
+                (azw3TypeIdentifier, "azw3"),
+                (mobiTypeIdentifier, "mobi"),
+                (epubTypeIdentifier, "epub"),
+                (pdfTypeIdentifier, "pdf")
+            ]
+            guard let selected = candidates.first(where: {
+                providerBox.value.hasItemConformingToTypeIdentifier($0.0)
+            }) else { return }
+            let typeIdentifier = selected.0
+            let expectedExtension = selected.1
+            _ = providerBox.value.loadInPlaceFileRepresentation(forTypeIdentifier: typeIdentifier) { url, isInPlace, _ in
+                guard let url else { return }
+                if isInPlace, ReaderDocumentKind(url: url) != nil {
+                    openDroppedURL(url)
+                } else {
+                    openDroppedURL(Self.preserveDroppedRepresentation(url, pathExtension: expectedExtension))
+                }
+            }
+        }
+
+        if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                let url = (item as? URL)
+                    ?? (item as? NSURL).map { $0 as URL }
+                    ?? (item as? Data).flatMap { data in
+                        String(data: data, encoding: .utf8).flatMap(URL.init(string:))
+                    }
+                if let url, ReaderDocumentKind(url: url) != nil {
+                    openDroppedURL(url)
+                } else {
+                    loadTypedRepresentation()
+                }
+            }
+        } else {
+            loadTypedRepresentation()
         }
         return true
+    }
+
+    nonisolated private static func preserveDroppedRepresentation(
+        _ sourceURL: URL,
+        pathExtension: String
+    ) -> URL? {
+        let fileManager = FileManager.default
+        guard let applicationSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let directory = applicationSupport
+            .appendingPathComponent("ReadingCompanionOpen/ImportedBooks", isDirectory: true)
+        let baseName = sourceURL.deletingPathExtension().lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeName = baseName.isEmpty ? "ImportedBook" : baseName
+        let target = directory
+            .appendingPathComponent("\(safeName)-\(UUID().uuidString)")
+            .appendingPathExtension(pathExtension)
+        do {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try fileManager.copyItem(at: sourceURL, to: target)
+            return target
+        } catch {
+            return nil
+        }
+    }
+
+    static var epubContentType: UTType {
+        UTType(filenameExtension: "epub") ?? UTType(importedAs: "org.idpf.epub-container")
+    }
+
+    static var azw3ContentType: UTType {
+        UTType(filenameExtension: "azw3") ?? UTType(importedAs: "com.amazon.azw3")
+    }
+
+    static var mobiContentType: UTType {
+        UTType(filenameExtension: "mobi") ?? UTType(importedAs: "com.amazon.mobi")
     }
 
     func go(to pageIndex: Int) {
@@ -351,9 +824,326 @@ final class ReaderModel: ObservableObject {
         persist()
     }
 
-    func changePage(by delta: Int) { go(to: currentPageIndex + delta) }
+    func changePage(by delta: Int) {
+        if reflowBook != nil { turnReflowPage(by: delta) }
+        else { go(to: currentPageIndex + delta * (pdfTwoPages ? 2 : 1)) }
+    }
+
+    func go(toSearchResult result: SearchRecord) {
+        navigationTarget = nil
+        searchNavigationTarget = result
+        searchNavigationCommand &+= 1
+    }
+
+    func addOrUpdateCharacter(_ character: BookCharacter) {
+        guard bookCategory == .fiction else { return }
+        let cleanName = character.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty else {
+            errorMessage = "人物姓名不能为空。"
+            return
+        }
+        var clean = character
+        clean.name = cleanName
+        clean.aliases = character.aliases
+            .flatMap { $0.components(separatedBy: CharacterSet(charactersIn: "、,，/；;")) }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0.localizedCaseInsensitiveCompare(cleanName) != .orderedSame }
+        clean.identity = character.information
+        clean.relationship = ""
+        if let index = characters.firstIndex(where: { $0.id == clean.id }) {
+            clean.colorHex = clean.colorHex ?? characters[index].colorHex ?? nextCharacterColorHex(excluding: clean.id)
+            characters[index] = clean
+        } else {
+            clean.colorHex = uniqueCharacterColorHex(preferred: clean.colorHex)
+            characters.append(clean)
+        }
+        characterOccurrenceCursor[clean.id] = nil
+        persist()
+    }
+
+    @discardableResult
+    func addCharacters(fromBatch source: String) -> Int {
+        guard bookCategory == .fiction else { return 0 }
+        var recognized = 0
+        for rawLine in source.components(separatedBy: .newlines) {
+            guard let parsed = Self.parseCharacterBatchLine(rawLine) else { continue }
+            var character = characters.first {
+                $0.name.localizedCaseInsensitiveCompare(parsed.name) == .orderedSame
+            } ?? BookCharacter(name: parsed.name)
+            character.name = parsed.name
+            character.aliases = parsed.aliases
+            character.identity = parsed.identity
+            character.relationship = parsed.relationship
+            addOrUpdateCharacter(character)
+            recognized += 1
+        }
+        if recognized > 0 { statusMessage = "已识别 \(recognized) 位人物" }
+        return recognized
+    }
+
+    static func parseCharacterBatchLine(_ source: String) -> (name: String, aliases: [String], identity: String, relationship: String)? {
+        let line = source.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "；;"))
+        guard !line.isEmpty else { return nil }
+
+        if line.contains("|") {
+            let fields = line.components(separatedBy: "|").map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard let name = fields.first, !name.isEmpty else { return nil }
+            let aliases = fields.count > 1
+                ? fields[1].components(separatedBy: CharacterSet(charactersIn: "、,，/；;"))
+                : []
+            let information = fields.dropFirst(2).filter { !$0.isEmpty }.joined(separator: "，")
+            return (name, aliases, information, "")
+        }
+
+        guard let separator = line.firstIndex(where: { $0 == "：" || $0 == ":" }) else { return nil }
+        let names = line[..<separator].components(separatedBy: CharacterSet(charactersIn: "/／"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard let name = names.first, !name.isEmpty else { return nil }
+        var seen = Set([name.lowercased()])
+        let aliases = names.dropFirst().filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
+        let details = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+        return (name, aliases, details, "")
+    }
+
+    private func uniqueCharacterColorHex(preferred: String?) -> String {
+        let used = Set(characters.compactMap { $0.colorHex?.uppercased() })
+        if let preferred = preferred?.uppercased(), !used.contains(preferred) { return preferred }
+        return Self.nextCharacterColorHex(used: used)
+    }
+
+    private func nextCharacterColorHex(excluding id: UUID) -> String {
+        let used = Set(characters.filter { $0.id != id }.compactMap { $0.colorHex?.uppercased() })
+        return Self.nextCharacterColorHex(used: used)
+    }
+
+    static func assignUniqueCharacterColors(_ source: [BookCharacter]) -> [BookCharacter] {
+        var result = source
+        var used = Set<String>()
+        for index in result.indices {
+            if result[index].identity.isEmpty,
+               result[index].relationship.isEmpty,
+               let parsed = parseCharacterBatchLine(result[index].name),
+               parsed.name != result[index].name {
+                result[index].name = parsed.name
+                result[index].identity = parsed.identity
+                result[index].relationship = parsed.relationship
+                if result[index].aliases.isEmpty { result[index].aliases = parsed.aliases }
+            }
+            result[index].identity = result[index].information
+            result[index].relationship = ""
+            let existing = result[index].colorHex?.uppercased()
+            if let existing, !used.contains(existing) {
+                result[index].colorHex = existing
+                used.insert(existing)
+            } else {
+                let generated = nextCharacterColorHex(used: used)
+                result[index].colorHex = generated
+                used.insert(generated)
+            }
+        }
+        return result
+    }
+
+    private static func nextCharacterColorHex(used: Set<String>) -> String {
+        for ordinal in 0..<10_000 {
+            let hue = (0.035 + Double(ordinal) * 0.618_033_988_75).truncatingRemainder(dividingBy: 1)
+            let saturation = 0.48 + Double(ordinal % 3) * 0.055
+            let brightness = 0.82 + Double((ordinal / 3) % 2) * 0.08
+            let color = NSColor(calibratedHue: hue, saturation: saturation, brightness: brightness, alpha: 1)
+                .usingColorSpace(.sRGB) ?? .systemPink
+            let hex = String(
+                format: "%02X%02X%02X",
+                Int((color.redComponent * 255).rounded()),
+                Int((color.greenComponent * 255).rounded()),
+                Int((color.blueComponent * 255).rounded())
+            )
+            if !used.contains(hex) { return hex }
+        }
+        return UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(6).uppercased()
+    }
+
+    func deleteCharacter(_ character: BookCharacter) {
+        characters.removeAll { $0.id == character.id }
+        characterOccurrenceCursor[character.id] = nil
+        persist()
+    }
+
+    /// 人物管理面板的统一保存入口：用面板编辑结果整体替换人物列表并持久化。
+    func replaceCharacters(_ newValue: [BookCharacter]) {
+        var cleaned: [BookCharacter] = []
+        for var character in newValue {
+            let cleanName = character.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanName.isEmpty else { continue }
+            guard !cleaned.contains(where: { $0.name.localizedCaseInsensitiveCompare(cleanName) == .orderedSame }) else { continue }
+            character.name = cleanName
+            character.aliases = character.aliases
+                .flatMap { $0.components(separatedBy: CharacterSet(charactersIn: "、,，/；;")) }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty && $0.localizedCaseInsensitiveCompare(cleanName) != .orderedSame }
+            character.identity = character.information
+            character.relationship = ""
+            cleaned.append(character)
+        }
+        characters = cleaned
+        for index in characters.indices where characters[index].colorHex == nil {
+            characters[index].colorHex = uniqueCharacterColorHex(preferred: nil)
+        }
+        let validIDs = Set(characters.map(\.id))
+        characterOccurrenceCursor = characterOccurrenceCursor.filter { validIDs.contains($0.key) }
+        persist()
+    }
+
+    func deleteCharacters(ids: Set<UUID>) {
+        characters.removeAll { ids.contains($0.id) }
+        for id in ids { characterOccurrenceCursor[id] = nil }
+        persist()
+    }
+
+    func moveCharacters(fromOffsets offsets: IndexSet, toOffset destination: Int) {
+        characters.move(fromOffsets: offsets, toOffset: destination)
+        persist()
+    }
+
+    /// 拖拽排序：把 id 对应的人物移动到 targetID 之前；targetID 为 nil 时移到末尾。
+    func moveCharacter(id: UUID, before targetID: UUID?) {
+        guard let from = characters.firstIndex(where: { $0.id == id }) else { return }
+        let item = characters.remove(at: from)
+        if let targetID, let target = characters.firstIndex(where: { $0.id == targetID }) {
+            guard characters.indices.contains(target) || target == characters.count else {
+                characters.insert(item, at: from)
+                return
+            }
+            characters.insert(item, at: target)
+        } else {
+            characters.append(item)
+        }
+        persist()
+    }
+
+    func setCharacterHighlightsEnabled(_ enabled: Bool) {
+        characterHighlightsEnabled = enabled
+        persist()
+    }
+
+    func characterOccurrences(for character: BookCharacter) -> [SearchRecord] {
+        let pages: [PageText]
+        if !pageTexts.isEmpty {
+            pages = pageTexts
+        } else {
+            pages = (0..<pageCount).compactMap { index in
+                guard let text = document?.page(at: index)?.string else { return nil }
+                return PageText(pageIndex: index, text: text, cameFromOCR: false)
+            }
+        }
+        var records: [SearchRecord] = []
+        for page in pages {
+            let display = Self.searchDisplayText(page.text)
+            for alias in character.allNames {
+                let ranges = Self.searchMatchRanges(query: alias, in: display)
+                for (occurrence, range) in ranges.enumerated() {
+                    records.append(SearchRecord(
+                        text: Self.searchSnippet(query: alias, in: display, occurrenceIndex: occurrence) ?? alias,
+                        pageIndex: page.pageIndex,
+                        occurrenceIndexInPage: occurrence,
+                        query: alias,
+                        offsetInPage: display.distance(from: display.startIndex, to: range.lowerBound)
+                    ))
+                }
+            }
+        }
+        var seen = Set<String>()
+        return records.sorted {
+            if $0.pageIndex != $1.pageIndex { return $0.pageIndex < $1.pageIndex }
+            if $0.offsetInPage != $1.offsetInPage { return $0.offsetInPage < $1.offsetInPage }
+            return ($0.query?.count ?? 0) > ($1.query?.count ?? 0)
+        }.filter { seen.insert("\($0.pageIndex)|\($0.offsetInPage)").inserted }
+    }
+
+    func characterOccurrenceWindow(
+        for character: BookCharacter,
+        occurrences: [SearchRecord]
+    ) -> Range<Int> {
+        Self.characterOccurrenceWindowRange(
+            pageIndices: occurrences.map(\.pageIndex),
+            currentPageIndex: currentPageIndex,
+            preferredIndex: characterOccurrenceCursor[character.id]
+        )
+    }
+
+    nonisolated static func characterOccurrenceWindowRange(
+        pageIndices: [Int],
+        currentPageIndex: Int,
+        preferredIndex: Int? = nil,
+        limit: Int = 11
+    ) -> Range<Int> {
+        guard !pageIndices.isEmpty, limit > 0 else { return 0..<0 }
+        guard pageIndices.count > limit else { return 0..<pageIndices.count }
+        let distances = pageIndices.map { abs($0 - currentPageIndex) }
+        let nearestDistance = distances.min() ?? 0
+        let nearestIndex: Int
+        if let preferredIndex,
+           pageIndices.indices.contains(preferredIndex),
+           distances[preferredIndex] == nearestDistance {
+            nearestIndex = preferredIndex
+        } else {
+            nearestIndex = distances.firstIndex(of: nearestDistance) ?? 0
+        }
+        let preferredBefore = (limit - 1) / 2
+        var lowerBound = max(0, nearestIndex - preferredBefore)
+        var upperBound = min(pageIndices.count, lowerBound + limit)
+        lowerBound = max(0, upperBound - limit)
+        upperBound = min(pageIndices.count, lowerBound + limit)
+        return lowerBound..<upperBound
+    }
+
+    func navigateCharacter(_ character: BookCharacter, direction: Int) {
+        let occurrences = characterOccurrences(for: character)
+        guard !occurrences.isEmpty else {
+            statusMessage = "全文中没有找到“\(character.name)”"
+            return
+        }
+        let targetIndex: Int
+        if let cursor = characterOccurrenceCursor[character.id] {
+            targetIndex = (cursor + (direction >= 0 ? 1 : -1) + occurrences.count) % occurrences.count
+        } else if direction >= 0 {
+            targetIndex = occurrences.firstIndex { $0.pageIndex >= currentPageIndex } ?? 0
+        } else {
+            targetIndex = occurrences.lastIndex { $0.pageIndex <= currentPageIndex } ?? (occurrences.count - 1)
+        }
+        characterOccurrenceCursor[character.id] = targetIndex
+        go(toSearchResult: occurrences[targetIndex])
+        statusMessage = "\(character.name) · 第 \(targetIndex + 1) / \(occurrences.count) 处"
+    }
+
+    func goToCharacterOccurrence(_ occurrence: SearchRecord, character: BookCharacter, index: Int) {
+        characterOccurrenceCursor[character.id] = index
+        go(toSearchResult: occurrence)
+        let total = characterOccurrences(for: character).count
+        statusMessage = "\(character.name) · 第 \(index + 1) / \(total) 处"
+    }
+
+    func turnReflowPage(by delta: Int) {
+        guard delta != 0 else { return }
+        reflowTurnDirection = delta > 0 ? 1 : -1
+        reflowTurnCommand &+= 1
+    }
+
+    func updateReflowPagination(pageNumber: Int, pageCount: Int, spreadCount: Int) {
+        reflowPageCount = max(pageCount, 1)
+        reflowSpreadCount = spreadCount == 2 ? 2 : 1
+        reflowPageNumber = min(max(pageNumber, 1), reflowPageCount)
+    }
 
     func didNavigate(to pageIndex: Int) {
+        guard document == nil || documentStateLoaded else { return }
+        // A reader-originated page change has completed. Clearing the pending
+        // programmatic target prevents the next SwiftUI update from sending the
+        // view back to the previously requested page.
+        navigationTarget = nil
         guard pageIndex != currentPageIndex else { return }
         currentPageIndex = pageIndex
         persist()
@@ -450,6 +1240,60 @@ final class ReaderModel: ObservableObject {
         statusMessage = "批注已添加"
         persist()
         scheduleOCRCorrection(for: record.id, original: text, fragments: normalizedFragments)
+        return record
+    }
+
+    @discardableResult
+    func recordReflowHighlight(
+        text: String,
+        pageIndex: Int,
+        anchor: ReflowTextAnchor,
+        anchors: [ReflowTextAnchor]? = nil,
+        tint: HighlightTint? = nil
+    ) -> HighlightRecord? {
+        let normalized = HighlightTextNormalizer.inline(text)
+        guard !normalized.isEmpty else { return nil }
+        let record = HighlightRecord(
+            text: normalized,
+            pageIndex: max(pageIndex, 0),
+            bounds: PDFRect(CGRect(x: 0, y: 0, width: 1, height: 1)),
+            tint: tint ?? highlightTint,
+            reflowAnchor: anchor,
+            reflowAnchors: anchors
+        )
+        let before = highlights
+        highlights.append(record)
+        rememberHighlightChange(from: before)
+        statusMessage = "已添加划线"
+        persist()
+        return record
+    }
+
+    @discardableResult
+    func recordReflowAnnotation(
+        text: String,
+        pageIndex: Int,
+        anchor: ReflowTextAnchor,
+        anchors: [ReflowTextAnchor]? = nil,
+        note: String?
+    ) -> HighlightRecord? {
+        let normalized = HighlightTextNormalizer.inline(text)
+        guard !normalized.isEmpty else { return nil }
+        let record = HighlightRecord(
+            text: normalized,
+            pageIndex: max(pageIndex, 0),
+            bounds: PDFRect(CGRect(x: 0, y: 0, width: 1, height: 1)),
+            tint: .yellow,
+            note: note?.trimmingCharacters(in: .whitespacesAndNewlines),
+            kind: .annotation,
+            reflowAnchor: anchor,
+            reflowAnchors: anchors
+        )
+        let before = highlights
+        highlights.append(record)
+        rememberHighlightChange(from: before)
+        statusMessage = "批注已添加"
+        persist()
         return record
     }
 
@@ -639,29 +1483,49 @@ final class ReaderModel: ObservableObject {
             }
         }
         let textByPage = Dictionary(indexedPages.map { ($0.pageIndex, $0.text) }, uniquingKeysWith: { first, _ in first })
+        var occurrenceCounts: [Int: Int] = [:]
         var results = document.findString(query, withOptions: [.caseInsensitive, .diacriticInsensitive])
             .compactMap { selection -> SearchRecord? in
             guard let page = selection.pages.first else { return nil }
             let index = document.index(for: page)
+            let occurrence = occurrenceCounts[index, default: 0]
+            occurrenceCounts[index] = occurrence + 1
             let source = textByPage[index] ?? page.string ?? selection.string ?? query
-            return SearchRecord(text: Self.searchSnippet(query: query, in: source) ?? selection.string ?? query, pageIndex: index)
+            return SearchRecord(
+                text: Self.searchSnippet(query: query, in: source, occurrenceIndex: occurrence)
+                    ?? selection.string ?? query,
+                pageIndex: index,
+                occurrenceIndexInPage: occurrence
+            )
         }
         let existingPages = Set(results.map(\.pageIndex))
         for page in indexedPages where !existingPages.contains(page.pageIndex) {
-            guard let snippet = Self.searchSnippet(query: query, in: page.text) else { continue }
-            results.append(SearchRecord(text: snippet, pageIndex: page.pageIndex))
+            let matchCount = Self.searchMatchRanges(query: query, in: Self.searchDisplayText(page.text)).count
+            for occurrence in 0..<matchCount {
+                guard let snippet = Self.searchSnippet(
+                    query: query,
+                    in: page.text,
+                    occurrenceIndex: occurrence
+                ) else { continue }
+                results.append(SearchRecord(
+                    text: snippet,
+                    pageIndex: page.pageIndex,
+                    occurrenceIndexInPage: occurrence
+                ))
+            }
         }
         if results.isEmpty {
             results = LocalIndex.retrieve(query, from: textChunks, limit: 30).map {
                 SearchRecord(
                     text: Self.searchSnippet(query: query, in: $0.text) ?? HighlightTextNormalizer.inline($0.text),
-                    pageIndex: $0.pageIndex
+                    pageIndex: $0.pageIndex,
+                    occurrenceIndexInPage: 0
                 )
             }
         }
         var seen = Set<String>()
         searchResults = results.filter {
-            seen.insert("\($0.pageIndex)|\(HighlightTextNormalizer.inline($0.text).lowercased())").inserted
+            seen.insert("\($0.pageIndex)|\($0.occurrenceIndexInPage)|\(HighlightTextNormalizer.inline($0.text).lowercased())").inserted
         }.sorted { lhs, rhs in
             if lhs.pageIndex == rhs.pageIndex { return lhs.text < rhs.text }
             return lhs.pageIndex < rhs.pageIndex
@@ -670,9 +1534,15 @@ final class ReaderModel: ObservableObject {
         statusMessage = "找到 \(searchResults.count) 处结果"
     }
 
-    nonisolated static func searchSnippet(query: String, in source: String) -> String? {
+    nonisolated static func searchSnippet(
+        query: String,
+        in source: String,
+        occurrenceIndex: Int = 0
+    ) -> String? {
         let display = searchDisplayText(source)
-        guard let match = searchMatchRanges(query: query, in: display).first else { return nil }
+        let matches = searchMatchRanges(query: query, in: display)
+        guard matches.indices.contains(occurrenceIndex) else { return nil }
+        let match = matches[occurrenceIndex]
 
         var start = display.startIndex
         var cursor = match.lowerBound
@@ -750,11 +1620,12 @@ final class ReaderModel: ObservableObject {
     }
 
     func persist() {
-        guard let documentURL else { return }
+        guard documentStateLoaded, let documentURL else { return }
         let shouldSaveDerivedCache = derivedCacheNeedsSave && !pageTexts.isEmpty
         if shouldSaveDerivedCache { derivedCacheNeedsSave = false }
         let state = DocumentState(
             lastPageIndex: currentPageIndex,
+            reflowReadingPosition: reflowReadingPosition,
             bookmarks: bookmarks,
             highlights: highlights,
             chats: chatTurns,
@@ -767,13 +1638,23 @@ final class ReaderModel: ObservableObject {
             outlineAlgorithmVersion: outlineWasManuallyEdited ? nil : outlineAlgorithmVersion,
             chapterSummaries: chapterSummaries,
             chapterSummaryAlgorithmVersion: chapterSummaryAlgorithmVersion,
-            answerCache: answerCache
+            pageRangeSummaries: pageRangeSummaries,
+            answerCache: answerCache,
+            bookCategory: bookCategory,
+            characters: characters,
+            characterHighlightsEnabled: characterHighlightsEnabled,
+            ljgReadSkillEnabled: assistantUsesLJGReadSkill
         )
-        Task {
+        let previousSave = persistenceTask
+        let cachedPages = pageTexts
+        let cachedOutline = outline
+        let cachedTitle = documentTitle
+        persistenceTask = Task {
+            await previousSave?.value
             do {
                 try await DocumentStore.shared.save(state, for: documentURL)
                 if shouldSaveDerivedCache {
-                    try await DocumentStore.shared.saveMarkdown(pages: pageTexts, outline: outline, title: documentTitle, for: documentURL)
+                    try await DocumentStore.shared.saveMarkdown(pages: cachedPages, outline: cachedOutline, title: cachedTitle, for: documentURL)
                 }
             }
             catch {
@@ -789,16 +1670,24 @@ final class ReaderModel: ObservableObject {
         indexingTask?.cancel()
         guard let document else { return }
         indexingProgress = 0
-        indexingStatus = "正在提取文本与 OCR…"
+        indexingStatus = documentKind == .pdf
+            ? "正在提取文本与 OCR…"
+            : "正在提取 \(documentKind?.rawValue ?? "电子书") 分页文本…"
         indexingTask = Task { @MainActor [weak self] in
             guard let self else { return }
             if let documentURL,
                let cachedPages = await DocumentStore.shared.loadMarkdown(for: documentURL) {
                 let cachedChunks = await DocumentStore.shared.loadIndex(for: documentURL, outline: self.outline)
+                let cachedSource: String
+                if self.documentKind == .pdf {
+                    cachedSource = cachedChunks == nil ? "OCR 缓存" : "OCR / 索引缓存"
+                } else {
+                    cachedSource = cachedChunks == nil ? "电子书文本缓存" : "电子书索引缓存"
+                }
                 self.installIndexedPages(
                     cachedPages,
                     cachedChunks: cachedChunks,
-                    source: cachedChunks == nil ? "OCR 缓存" : "OCR / 索引缓存"
+                    source: cachedSource
                 )
                 if cachedChunks == nil {
                     try? await DocumentStore.shared.saveMarkdown(
@@ -812,11 +1701,16 @@ final class ReaderModel: ObservableObject {
             }
             let pages = await OCRService.extract(from: document) { completed, total in
                 self.indexingProgress = total == 0 ? 0 : Double(completed) / Double(total)
-                self.indexingStatus = "正在处理第 \(completed) / \(total) 页"
+                self.indexingStatus = self.documentKind == .pdf
+                    ? "正在提取/OCR 第 \(completed) / \(total) 页"
+                    : "正在建立 \(self.documentKind?.rawValue ?? "电子书") 文本索引 · \(completed) / \(total)"
             }
             guard !Task.isCancelled else { return }
             let compactPages = PDFMarkdownDocument.compactPages(pages)
-            self.installIndexedPages(compactPages, cachedChunks: nil, source: "PDF → Markdown")
+            let source = self.documentKind == .pdf
+                ? "PDF → Markdown"
+                : "\(self.documentKind?.rawValue ?? "电子书") 可重排正文 → Markdown"
+            self.installIndexedPages(compactPages, cachedChunks: nil, source: source)
             if let documentURL {
                 try? await DocumentStore.shared.saveMarkdown(
                     pages: compactPages,
@@ -852,7 +1746,7 @@ final class ReaderModel: ObservableObject {
         }
         guard !tocPageIndices.isEmpty else {
             outlineStatus = "未找到目录页"
-            if showErrors { errorMessage = "没有定位到可信目录页。请确认 PDF 中有印刷目录页，并检查目录页文字能否被选中或被 OCR 识别。" }
+            if showErrors { errorMessage = "没有定位到可信目录页。可以使用“手动添加”直接建立目录。" }
             return
         }
         guard let apiKey = sessionAPIKey, !apiKey.isEmpty else {
@@ -906,7 +1800,9 @@ final class ReaderModel: ObservableObject {
             return
         }
         guard !isLocatingTOC, !isRefiningOutline else { return }
-        let nativeOutline = OutlineBuilder.entries(for: document)
+        let nativeOutline = documentKind != .pdf && !embeddedOutline.isEmpty
+            ? embeddedOutline
+            : OutlineBuilder.entries(for: document)
         embeddedOutline = nativeOutline
         if !nativeOutline.isEmpty {
             outline = nativeOutline
@@ -916,8 +1812,8 @@ final class ReaderModel: ObservableObject {
             outlineWasManuallyEdited = false
             tocPageIndices = []
             rebuildTextIndex(using: nativeOutline)
-            outlineStatus = "PDF 自带目录 · \(nativeOutline.count) 项"
-            statusMessage = "已使用 PDF 自带目录"
+            outlineStatus = "\(documentKind?.rawValue ?? "文档") 自带目录 · \(nativeOutline.count) 项"
+            statusMessage = "已使用文档自带目录"
             persist()
             return
         }
@@ -951,14 +1847,9 @@ final class ReaderModel: ObservableObject {
                 TOCPageTextBuilder.build(pages: self.pageTexts, pageIndices: located),
                 legacyAutomatic: true
             )
-            let refreshed: [PageText]
-            if let enhanced = await self.enhancedTOCPageTexts(pageIndices: located, document: document) {
-                refreshed = enhanced
-            } else {
-                self.outlineStatus = "自动 · 正在重读目录页…"
-                refreshed = await OCRService.reextract(pageIndices: located, from: document, legacyAutomaticTOC: true) { completed, total in
-                    self.outlineStatus = "自动 · 读取 \(completed) / \(total)"
-                }
+            self.outlineStatus = "自动 · 正在重读目录页…"
+            let refreshed = await OCRService.reextract(pageIndices: located, from: document, legacyAutomaticTOC: true) { completed, total in
+                self.outlineStatus = "自动 · 读取 \(completed) / \(total)"
             }
             for page in refreshed { byPage[page.pageIndex] = page }
             self.pageTexts = byPage.values.sorted { $0.pageIndex < $1.pageIndex }
@@ -1091,8 +1982,8 @@ final class ReaderModel: ObservableObject {
 
     func restoreEmbeddedOutline() {
         guard !embeddedOutline.isEmpty else {
-            outlineStatus = "PDF 无自带目录"
-            statusMessage = "PDF 无自带目录"
+            outlineStatus = "\(documentKind?.rawValue ?? "文档") 无自带目录"
+            statusMessage = "文档无自带目录"
             return
         }
         outline = embeddedOutline
@@ -1103,7 +1994,7 @@ final class ReaderModel: ObservableObject {
         tocPageIndices = []
         rebuildTextIndex(using: embeddedOutline)
         refreshEmbeddedOutlineStatus()
-        statusMessage = "已恢复 PDF 自带目录"
+        statusMessage = "已恢复文档自带目录"
         persist()
     }
 
@@ -1114,16 +2005,16 @@ final class ReaderModel: ObservableObject {
         }
         guard !embeddedOutline.isEmpty else {
             outlineStatus = outline.isEmpty
-                ? "PDF 无自带目录"
-                : "PDF 无自带目录 · 当前 \(outline.count) 项"
+                ? "\(documentKind?.rawValue ?? "文档") 无自带目录"
+                : "\(documentKind?.rawValue ?? "文档") 无自带目录 · 当前 \(outline.count) 项"
             return
         }
         let usingEmbedded = outline.count == embeddedOutline.count && zip(outline, embeddedOutline).allSatisfy { pair in
             pair.0.title == pair.1.title && pair.0.pageIndex == pair.1.pageIndex && pair.0.level == pair.1.level
         }
         outlineStatus = usingEmbedded
-            ? "PDF 自带目录 · \(embeddedOutline.count) 项"
-            : "已识别 PDF 自带目录 · 当前 \(outline.count) 项"
+            ? "\(documentKind?.rawValue ?? "文档") 自带目录 · \(embeddedOutline.count) 项"
+            : "已识别文档自带目录 · 当前 \(outline.count) 项"
     }
 
     private func applyLocatedTOCPages(
@@ -1211,31 +2102,6 @@ final class ReaderModel: ObservableObject {
         return candidates.sorted()
     }
 
-    private func enhancedTOCPageTexts(pageIndices: [Int], document: PDFDocument) async -> [PageText]? {
-        enhancedTOCInstalled = EnhancedTOCService.isInstalled
-        guard enhancedTOCInstalled, !pageIndices.isEmpty else { return nil }
-        outlineStatus = "增强版面识别 · 正在分析 \(pageIndices.count) 页…"
-        do {
-            let inputURL = try EnhancedTOCService.makeInputPDF(from: document, pageIndices: pageIndices)
-            let temporaryDirectory = inputURL.deletingLastPathComponent()
-            defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
-            let results = try await enhancedTOC.recognize(pdfURL: inputURL, sourcePageIndices: pageIndices)
-            guard !results.isEmpty else { return nil }
-            let pageLabels = Dictionary(uniqueKeysWithValues: pageTexts.map { ($0.pageIndex, $0.pageLabel) })
-            outlineStatus = "增强版面识别 · 已读取 \(results.count) / \(pageIndices.count)"
-            return results.map {
-                PageText(
-                    pageIndex: $0.pageIndex,
-                    text: TOCInputNormalizer.normalize($0.text, legacyAutomatic: true),
-                    cameFromOCR: true,
-                    pageLabel: pageLabels[$0.pageIndex] ?? nil
-                )
-            }
-        } catch {
-            statusMessage = "增强识别暂不可用，已自动回退"
-            return nil
-        }
-    }
 
     private func discardCurrentAutomaticOutline() {
         guard !outlineWasManuallyEdited else { return }
@@ -1289,6 +2155,8 @@ final class ReaderModel: ObservableObject {
         assistantUsesWebSearch = false
         let usesWholeBook = assistantUsesWholeBook
         assistantUsesWholeBook = false
+        let companionMode = aiCompanionMode
+        let usesLJGReadSkill = assistantUsesLJGReadSkill
         let scope = pendingContextScope
         pendingContextScope = .standard
         pendingAnswerUsesWebSearch = usesWebSearch
@@ -1298,13 +2166,15 @@ final class ReaderModel: ObservableObject {
             trimmed,
             focusPageIndex: focusPage,
             from: textChunks,
-            limit: aiReadingDepth.contextLimit,
+            limit: companionMode == .free ? min(aiReadingDepth.contextLimit, 6) : aiReadingDepth.contextLimit,
             wholeBook: usesWholeBook,
             scope: scope
         )
         let context = LocalIndex.prepareForPrompt(
             retrievedContext,
-            tokenBudget: aiReadingDepth.contextTokenBudget(scope: scope, wholeBook: usesWholeBook)
+            tokenBudget: companionMode == .free
+                ? min(aiReadingDepth.contextTokenBudget(scope: scope, wholeBook: usesWholeBook), 4_500)
+                : aiReadingDepth.contextTokenBudget(scope: scope, wholeBook: usesWholeBook)
         )
         let cacheIdentity = Self.promptCacheIdentity(for: documentURL)
         let history = Self.contextualHistory(
@@ -1317,6 +2187,8 @@ final class ReaderModel: ObservableObject {
             model: aiModel,
             provider: aiProvider,
             depth: aiReadingDepth,
+            companionMode: companionMode,
+            usesLJGReadSkill: usesLJGReadSkill,
             usesWebSearch: usesWebSearch,
             usesWholeBook: usesWholeBook,
             history: history
@@ -1351,6 +2223,8 @@ final class ReaderModel: ObservableObject {
                     apiKey: apiKey,
                     provider: aiProvider,
                     readingDepth: aiReadingDepth,
+                    companionMode: companionMode,
+                    usesLJGReadSkill: usesLJGReadSkill,
                     usesWebSearch: usesWebSearch,
                     usesWholeBook: usesWholeBook,
                     bookOutline: usesWholeBook ? outline : [],
@@ -1456,6 +2330,7 @@ final class ReaderModel: ObservableObject {
     }
 
     func applyQuickQuestion(_ action: String) {
+        guard aiCompanionMode == .academic else { return }
         let expandedQuestion: String
         switch action {
         case "解释":
@@ -1474,6 +2349,16 @@ final class ReaderModel: ObservableObject {
             assistantDraft = expandedQuestion
         }
         assistantVisible = true
+    }
+
+    func selectAICompanionMode(_ mode: AICompanionMode) {
+        guard document == nil, aiCompanionMode != mode else { return }
+        aiCompanionMode = mode
+        assistantUsesWebSearch = false
+        pendingContextScope = .standard
+        statusMessage = mode == .academic
+            ? "已选择非虚构类"
+            : "已选择虚构类 · 简短回答"
     }
 
     func saveAISettings(apiKey: String, model: String, remember: Bool) {
@@ -1928,6 +2813,175 @@ final class ReaderModel: ObservableObject {
         }
     }
 
+    var pageRangeSummaryPageCount: Int {
+        reflowBook == nil ? pageCount : reflowPageCount
+    }
+
+    func generatePageRangeSummary(startPage: Int, endPage: Int) {
+        guard bookCategory == .fiction else { return }
+        let maximum = pageRangeSummaryPageCount
+        guard startPage >= 1, endPage >= startPage, endPage <= maximum else {
+            errorMessage = "请输入 1–\(max(maximum, 1)) 之间的有效页码范围。"
+            return
+        }
+        guard let apiKey = sessionAPIKey, !apiKey.isEmpty else {
+            errorMessage = "请先在设置中验证 API Key。"
+            return
+        }
+        guard indexingProgress >= 1, !textChunks.isEmpty else {
+            errorMessage = "全文索引尚未完成。"
+            return
+        }
+        guard !isGeneratingPageRangeSummary else { return }
+        let request = PageRangeSummaryRequest(startPage: startPage, endPage: endPage)
+        activePageRangeSummaryRequestID = request.id
+        isGeneratingPageRangeSummary = true
+        if reflowBook != nil {
+            pageRangeSummaryRequest = request
+        } else {
+            generateResolvedPageRangeSummary(
+                request,
+                sourceStartPageIndex: startPage - 1,
+                sourceEndPageIndex: endPage - 1,
+                apiKey: apiKey
+            )
+        }
+    }
+
+    func resolvePageRangeSummaryRequest(
+        _ request: PageRangeSummaryRequest,
+        renderedPageTexts: [String],
+        anchors: [ReflowTextAnchor]? = nil
+    ) {
+        guard activePageRangeSummaryRequestID == request.id else { return }
+        pageRangeSummaryRequest = nil
+        guard let apiKey = sessionAPIKey, !apiKey.isEmpty else {
+            failPageRangeSummaryRequest(request.id, message: "AI 连接已失效，请重新验证 API Key。")
+            return
+        }
+        let context = renderedPageTexts.enumerated().compactMap { offset, text -> TextChunk? in
+            let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty else { return nil }
+            return TextChunk(
+                pageIndex: request.startPage - 1 + offset,
+                chapterTitle: nil,
+                text: normalized
+            )
+        }
+        var resolved = request
+        resolved.reflowAnchors = anchors
+        generateResolvedPageRangeSummary(resolved, context: context, apiKey: apiKey)
+    }
+
+    func failPageRangeSummaryResolution(_ requestID: UUID) {
+        failPageRangeSummaryRequest(requestID, message: "无法解析这段页码范围，请稍后重试。")
+    }
+
+    nonisolated static func pageRangeContext(
+        chunks: [TextChunk],
+        startPageIndex: Int,
+        endPageIndex: Int
+    ) -> [TextChunk] {
+        let lower = min(startPageIndex, endPageIndex)
+        let upper = max(startPageIndex, endPageIndex)
+        return chunks.filter { (lower...upper).contains($0.pageIndex) }
+    }
+
+    private func generateResolvedPageRangeSummary(
+        _ request: PageRangeSummaryRequest,
+        sourceStartPageIndex: Int,
+        sourceEndPageIndex: Int,
+        apiKey: String
+    ) {
+        guard activePageRangeSummaryRequestID == request.id else { return }
+        let context = Self.pageRangeContext(
+            chunks: textChunks,
+            startPageIndex: sourceStartPageIndex,
+            endPageIndex: sourceEndPageIndex
+        )
+        generateResolvedPageRangeSummary(request, context: context, apiKey: apiKey)
+    }
+
+    private func generateResolvedPageRangeSummary(
+        _ request: PageRangeSummaryRequest,
+        context: [TextChunk],
+        apiKey: String
+    ) {
+        guard !context.isEmpty else {
+            failPageRangeSummaryRequest(request.id, message: "所选页码范围没有可用文本。")
+            return
+        }
+        let sourceURL = documentURL
+        Task {
+            do {
+                let content = try await openAI.generateFictionPageRangeSummary(
+                    pageLabel: "第 \(request.startPage)–\(request.endPage) 页",
+                    context: context,
+                    model: aiModel,
+                    apiKey: apiKey,
+                    provider: aiProvider
+                )
+                await MainActor.run {
+                    guard self.activePageRangeSummaryRequestID == request.id,
+                          self.documentURL == sourceURL else { return }
+                    self.pageRangeSummaries.insert(PageRangeSummaryRecord(
+                        startPage: request.startPage,
+                        endPage: request.endPage,
+                        summary: content,
+                        reflowAnchors: request.reflowAnchors
+                    ), at: 0)
+                    self.pageRangeSummaryRequest = nil
+                    self.isGeneratingPageRangeSummary = false
+                    self.activePageRangeSummaryRequestID = nil
+                    self.statusMessage = "第 \(request.startPage)–\(request.endPage) 页概要已生成"
+                    self.persist()
+                }
+            } catch {
+                await MainActor.run {
+                    guard self.activePageRangeSummaryRequestID == request.id else { return }
+                    self.pageRangeSummaryRequest = nil
+                    self.isGeneratingPageRangeSummary = false
+                    self.activePageRangeSummaryRequestID = nil
+                    self.handleOpenAIError(error, showAlert: true)
+                }
+            }
+        }
+    }
+
+    private func failPageRangeSummaryRequest(_ requestID: UUID, message: String) {
+        guard activePageRangeSummaryRequestID == requestID else { return }
+        pageRangeSummaryRequest = nil
+        isGeneratingPageRangeSummary = false
+        activePageRangeSummaryRequestID = nil
+        errorMessage = message
+    }
+
+    func goToOutline(_ entry: OutlineEntry) {
+        if reflowBook != nil, let anchor = outlineReflowAnchors[entry.id] { goToReflowAnchor(anchor) }
+        else { go(to: entry.pageIndex) }
+    }
+
+    func goToPageRangeSummary(_ record: PageRangeSummaryRecord) {
+        if reflowBook != nil, let anchor = record.reflowAnchors?.first { goToReflowAnchor(anchor) }
+        else if reflowBook != nil {
+            // Legacy summaries gain stable text anchors when the reader resolves its references.
+            statusMessage = "正在定位概要原文，请稍后再试"
+        } else { go(to: record.startPage - 1) }
+    }
+
+    private func goToReflowAnchor(_ anchor: ReflowTextAnchor) {
+        navigationTarget = nil
+        reflowAnchorTarget = anchor
+        reflowAnchorCommand &+= 1
+    }
+
+    func deletePageRangeSummary(id: UUID) {
+        guard let index = pageRangeSummaries.firstIndex(where: { $0.id == id }) else { return }
+        let removed = pageRangeSummaries.remove(at: index)
+        statusMessage = "\(removed.pageLabel)概要已删除"
+        persist()
+    }
+
     func chapterSummary(for entry: OutlineEntry) -> String? {
         chapterSummaries[chapterSummaryKey(for: entry)]
     }
@@ -1954,6 +3008,7 @@ final class ReaderModel: ObservableObject {
             return
         }
         generatingChapterSummaryKeys.insert(key)
+        let companionMode = aiCompanionMode
         let siblings = outline.filter { $0.level == entry.level }
         let position = siblings.firstIndex(where: { $0.id == entry.id })
         let previous = position.flatMap { $0 > 0 ? siblings[$0 - 1] : nil }
@@ -1969,7 +3024,8 @@ final class ReaderModel: ObservableObject {
                     nextChapter: next.map { ($0.title, nextContext) },
                     model: aiModel,
                     apiKey: apiKey,
-                    provider: aiProvider
+                    provider: aiProvider,
+                    companionMode: companionMode
                 )
                 await MainActor.run {
                     self.chapterSummaries[key] = content
@@ -1987,7 +3043,7 @@ final class ReaderModel: ObservableObject {
     }
 
     private func chapterSummaryKey(for entry: OutlineEntry) -> String {
-        "\(entry.level)|\(entry.pageIndex)|\(entry.title)"
+        "\(aiCompanionMode.rawValue)|\(entry.level)|\(entry.pageIndex)|\(entry.title)"
     }
 
     func sendHighlightToObsidian(_ highlight: HighlightRecord) {
@@ -2054,7 +3110,7 @@ final class ReaderModel: ObservableObject {
     func rotateCurrentPage() {
         guard let page = document?.page(at: currentPageIndex) else { return }
         page.rotation = (page.rotation + 90) % 360
-        statusMessage = "当前页已顺时针旋转 90°（原 PDF 未修改）"
+        statusMessage = "当前页已顺时针旋转 90°（原始文档未修改）"
         navigationTarget = nil
         navigationTarget = currentPageIndex
     }
@@ -2357,12 +3413,15 @@ final class ReaderModel: ObservableObject {
         model: String,
         provider: AIProvider,
         depth: AIReadingDepth,
+        companionMode: AICompanionMode = .academic,
+        usesLJGReadSkill: Bool = true,
         usesWebSearch: Bool,
         usesWholeBook: Bool,
         history: [ChatTurn]
     ) -> String {
         let material = [
-            "v4", provider.storageAccount, model, depth.rawValue,
+            "v6", provider.storageAccount, model, depth.rawValue, companionMode.rawValue,
+            usesLJGReadSkill.description,
             usesWebSearch.description, usesWholeBook.description,
             HighlightTextNormalizer.inline(question),
             context.map { "P\($0.pageIndex + 1)|\($0.text)" }.joined(separator: "\n"),

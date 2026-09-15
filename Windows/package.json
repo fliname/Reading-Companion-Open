@@ -1,6 +1,7 @@
 {
   "name": "reading-companion-windows",
-  "version": "0.43.18",
+  "version": "0.44.4",
+  "packageManager": "pnpm@11.19.0",
   "edition": "public",
   "description": "Reading Companion for Windows",
   "main": "src/main/main.cjs",
@@ -11,37 +12,55 @@
     "start": "pnpm run vendor && electron .",
     "test": "node --test tests/*.test.cjs",
     "pack:win": "pnpm run vendor && electron-builder --win dir --x64",
-    "dist:win": "pnpm run vendor && electron-builder --win nsis --x64"
+    "dist:win": "pnpm run vendor && electron-builder --win nsis --x64",
+    "dist:zip": "pnpm run vendor && electron-builder --win zip --x64",
+    "sync:reflow": "node scripts/sync-mac-reflow.cjs"
   },
   "dependencies": {
-    "marked": "17.0.3",
-    "pdfjs-dist": "6.2.108",
+    "adm-zip": "^0.5.16",
     "tesseract.js": "7.0.0"
   },
   "devDependencies": {
     "cross-env": "10.1.0",
     "electron": "43.4.1",
-    "electron-builder": "26.15.3"
+    "electron-builder": "26.15.3",
+    "marked": "17.0.3",
+    "pdfjs-dist": "6.2.108"
   },
   "build": {
     "appId": "com.ljg.reading-companion.open.windows",
     "productName": "Reading Companion Open",
     "asar": true,
-    "asarUnpack": [
-      "node_modules/tesseract.js/**",
-      "node_modules/tesseract.js-core/**"
+    "electronLanguages": [
+      "en-US",
+      "zh-CN"
     ],
     "files": [
       "src/**/*",
       "resources/**/*",
+      "!resources/AppIcon-1024.png",
+      "!resources/windows-installer.nsi",
       "!resources/tessdata/**/*",
+      "!resources/BookConverter/**/*",
+      "!resources/windows-speech.ps1",
       "package.json",
       "LICENSE",
       "THIRD_PARTY_NOTICES.md",
-      "node_modules/tesseract.js/**/*",
-      "node_modules/tesseract.js-core/**/*"
+      "node_modules/**/*",
+      "!node_modules/@napi-rs/**",
+      "!**/EnhancedTOC/**",
+      "!**/rapid_toc_ocr.py",
+      "!**/site-packages/{torch,torchvision,sympy}/**"
     ],
     "extraResources": [
+      {
+        "from": "resources/BookConverter",
+        "to": "BookConverter",
+        "filter": [
+          "mobitool.exe",
+          "COPYING.LGPL-3.0"
+        ]
+      },
       {
         "from": "resources/tessdata",
         "to": "tessdata"
@@ -68,6 +87,11 @@
     "directories": {
       "output": "dist",
       "buildResources": "resources"
-    }
+    },
+    "asarUnpack": [
+      "node_modules/tesseract.js/**",
+      "node_modules/tesseract.js-core/**",
+      "node_modules/wasm-feature-detect/**"
+    ]
   }
 }

@@ -1,15 +1,36 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('readingCompanion', {
   platform: process.platform,
   edition: process.argv.includes('--public-edition') ? 'public' : 'local',
   openPDFDialog: () => ipcRenderer.invoke('dialog:open-pdf'),
+  droppedFilePath: file => webUtils.getPathForFile(file),
   openFolderDialog: () => ipcRenderer.invoke('dialog:open-folder'),
   readPDF: sourcePath => ipcRenderer.invoke('pdf:read', sourcePath),
+  // Import books (EPUB/Kindle)
+  importBook: sourcePath => ipcRenderer.invoke('book:import', sourcePath),
+  importBookWithCategory: (sourcePath, category) => ipcRenderer.invoke('book:import', sourcePath, category),
+  onBookImportProgress: callback => ipcRenderer.on('book:import-progress', (_event, payload) => callback(payload)),
+
+  // Bookshelf
+  listBookshelfFolders: () => ipcRenderer.invoke('bookshelf:list-folders'),
+  createBookshelfFolder: (name, parentID) => ipcRenderer.invoke('bookshelf:create-folder', { name, parentID }),
+  renameBookshelfFolder: (id, name) => ipcRenderer.invoke('bookshelf:rename-folder', { id, name }),
+  deleteBookshelfFolder: id => ipcRenderer.invoke('bookshelf:delete-folder', id),
+  moveProject: (sourcePath, folderID) => ipcRenderer.invoke('bookshelf:move-project', { sourcePath, folderID }),
+  setProjectsFolderMembership: (sourcePaths, folderID, included) => ipcRenderer.invoke('bookshelf:set-folder-membership', { sourcePaths, folderID, included }),
+  setProjectsCategory: (sourcePaths, category) => ipcRenderer.invoke('bookshelf:set-category', { sourcePaths, category }),
+  saveCover: (sourcePath, dataURL) => ipcRenderer.invoke('bookshelf:save-cover', { sourcePath, dataURL }),
+  loadCover: sourcePath => ipcRenderer.invoke('bookshelf:load-cover', sourcePath),
+
+  // File dialog for books
+  openBookDialog: () => ipcRenderer.invoke('dialog:open-book'),
   fileStat: target => ipcRenderer.invoke('file:stat', target),
   recognizeOCR: payload => ipcRenderer.invoke('ocr:recognize', payload),
   cancelOCR: jobId => ipcRenderer.invoke('ocr:cancel', jobId),
   onOCRProgress: callback => ipcRenderer.on('ocr:progress', (_event, payload) => callback(payload)),
+  onProjectFlush: callback => ipcRenderer.on('project:flush', () => callback()),
+  projectFlushed: () => ipcRenderer.send('project:flushed'),
   getInitialProject: () => ipcRenderer.invoke('project:initial'),
   onMenuOpenPDF: callback => ipcRenderer.on('menu:open-pdf', () => callback()),
   openProject: (sourcePath, currentPath) => ipcRenderer.invoke('project:open', { sourcePath, currentPath }),
@@ -25,11 +46,14 @@ contextBridge.exposeInMainWorld('readingCompanion', {
   listModels: settings => ipcRenderer.invoke('ai:list-models', settings),
   detectProvider: apiKey => ipcRenderer.invoke('ai:detect-provider', apiKey),
   requestAI: request => ipcRenderer.invoke('ai:request', request),
+  generateFictionSummary: request => ipcRenderer.invoke('ai:fiction-summary', request),
   cancelAI: id => ipcRenderer.invoke('ai:cancel', id),
   onAIProgress: callback => ipcRenderer.on('ai:progress', (_event, payload) => callback(payload)),
   startSpeech: language => ipcRenderer.invoke('speech:start', language),
   stopSpeech: () => ipcRenderer.invoke('speech:stop'),
   onSpeech: callback => ipcRenderer.on('speech:result', (_event, payload) => callback(payload)),
+  onUpdateProgress: callback => ipcRenderer.on('update:progress', (_event, payload) => callback(payload)),
+  checkForUpdates: () => ipcRenderer.invoke('update:check'),
   readClipboard: () => ipcRenderer.invoke('clipboard:read'),
   writeClipboard: text => ipcRenderer.invoke('clipboard:write', text),
   writeTextFile: (target, content) => ipcRenderer.invoke('file:write-text', { target, content }),

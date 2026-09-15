@@ -1,9 +1,9 @@
 const TOKEN_RE = /[\p{Script=Han}]|[A-Za-z0-9_]+/gu;
 
 export const DEPTHS = {
-  economical: { label: '节省', contextLimit: 6, historyLimit: 4, outputLimit: 1500, reasoningEffort: 'low', budgets: { explanation: 3200, standard: 5000, context: 6500 } },
-  balanced: { label: '均衡', contextLimit: 9, historyLimit: 8, outputLimit: 3000, reasoningEffort: 'low', budgets: { explanation: 4800, standard: 7200, context: 9600 } },
-  deep: { label: '深读', contextLimit: 14, historyLimit: 12, outputLimit: 5000, reasoningEffort: 'medium', budgets: { explanation: 6500, standard: 10000, context: 14000 } }
+  economical: { label: '节省', contextLimit: 6, historyLimit: 4, outputLimit: 1800, reasoningEffort: 'low', maxContinuations: 1, budgets: { explanation: 3200, standard: 5000, context: 6500 } },
+  balanced: { label: '均衡', contextLimit: 9, historyLimit: 8, outputLimit: 4000, reasoningEffort: 'low', maxContinuations: 1, budgets: { explanation: 4800, standard: 7200, context: 9600 } },
+  deep: { label: '深读', contextLimit: 14, historyLimit: 12, outputLimit: 8000, reasoningEffort: 'medium', maxContinuations: 2, budgets: { explanation: 6500, standard: 10000, context: 14000 } }
 };
 
 export function normalizeText(source = '') {

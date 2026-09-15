@@ -1,11 +1,27 @@
 function escapeMarkdown(value = '') {
-  return String(value).replace(/\\/g, '\\\\').replace(/[<>`*_\[\]]/g, match => `\\${match}`);
+  return String(value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/\\/g, '\\\\').replace(/[`*_\[\]]/g, match => `\\${match}`);
+}
+
+function yamlQuoted(value = '') {
+  return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, '\\n')}"`;
+}
+
+function blueAnnotation(value = '') {
+  return `<span style="color: #3b82f6;">${escapeMarkdown(value).replace(/\n/g, '\n> ')}</span>`;
 }
 
 export function safeFileName(value = '') { return value.replace(/[\\/:*?"<>|]/g, '-').trim() || 'Reading Companion'; }
 
-export function skeleton(title, outline = []) {
-  const lines = [`# ${title}`, ''];
+export function skeleton(title, outline = [], sourcePath = null) {
+  const lines = ['---', `title: ${yamlQuoted(title)}`, 'type: reading-note'];
+  if (sourcePath) {
+    lines.push(`source: ${yamlQuoted(sourcePath)}`);
+    const extension = String(sourcePath).split(/[\\/]/).at(-1)?.match(/\.([^.]+)$/)?.[1]?.toLowerCase();
+    if (extension) lines.push(`format: ${yamlQuoted(extension)}`);
+  }
+  lines.push('tags:', '  - reading-companion', '---', '', `# ${title}`, '');
   for (const entry of outline) {
     if (entry.title.trim().toLowerCase() === title.trim().toLowerCase()) continue;
     lines.push(`${'#'.repeat(Math.min(6, Math.max(2, Number(entry.level || 0) + 2)))} ${entry.title}`, '');
@@ -25,11 +41,12 @@ export function ensureOutline(markdown, outline = []) {
 export function highlightBlock(mark) {
   const text = escapeMarkdown(mark.text || '').replace(/\n/g, '\n> ');
   if (mark.kind === 'annotation') {
-    const note = mark.note ? `\n>\n> ${escapeMarkdown(mark.note).replace(/\n/g, '\n> ')}` : '';
+    const note = mark.note ? `\n>\n> ${blueAnnotation(mark.note)}` : '';
     return `> [!success] 批注 · P${mark.pageIndex + 1}\n> *原文：* ${text}${note}`;
   }
   const callout = { yellow: 'warning', red: 'danger', blue: 'info' }[mark.color] || 'warning';
-  return `> [!${callout}] 划线 · P${mark.pageIndex + 1}\n> ${text}`;
+  const note = mark.note ? `\n\n> [!note] 批注\n> ${blueAnnotation(mark.note)}` : '';
+  return `> [!${callout}] 划线 · P${mark.pageIndex + 1}\n> ${text}${note}`;
 }
 
 export function aiBlock(turns, { collapsed = false, condensed = null } = {}) {

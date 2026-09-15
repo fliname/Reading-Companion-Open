@@ -365,6 +365,24 @@ struct ReadingCompanionTests {
         #expect(!ObsidianNoteBuilder.highlightBlock(record).contains("<!--"))
     }
 
+    @Test func obsidianNotebookStartsWithPropertiesAndAnnotationTextIsBlue() {
+        let notebook = ObsidianNoteBuilder.skeleton(
+            title: "测试\"书",
+            sourcePath: "/Users/example/Books/测试书.epub",
+            outline: []
+        )
+        #expect(notebook.hasPrefix("---\ntitle: \"测试\\\"书\"\ntype: reading-note\n"))
+        #expect(notebook.contains("source: \"/Users/example/Books/测试书.epub\""))
+        #expect(notebook.contains("format: \"epub\""))
+        #expect(notebook.contains("tags:\n  - reading-companion\n---"))
+        let record = HighlightRecord(
+            text: "原文", pageIndex: 2,
+            bounds: PDFRect(CGRect(x: 0, y: 0, width: 10, height: 10)),
+            tint: .yellow, note: "批注内容", kind: .annotation
+        )
+        #expect(ObsidianNoteBuilder.highlightBlock(record).contains("<span style=\"color: #3b82f6;\">批注内容</span>"))
+    }
+
     @Test func companionPromptEmbedsTheLJGReadProtocol() {
         #expect(OpenAIService.companionInstructions.contains("<ljg_read_protocol version=\"1.2.0\" skill=\"ljg-read\">"))
         #expect(OpenAIService.companionInstructions.contains("[骨]"))
@@ -388,6 +406,21 @@ struct ReadingCompanionTests {
         )
         #expect(replyTurn.contains("mode=\"reader_reply\""))
         #expect(replyTurn.contains("最强反驳"))
+    }
+
+    @Test func freeCompanionModeIsShortAndDoesNotInheritAcademicProtocol() {
+        #expect(OpenAIService.freeCompanionInstructions.contains("虚构类伴读"))
+        #expect(OpenAIService.freeCompanionInstructions.contains("不加载学术伴读框架"))
+        #expect(!OpenAIService.freeCompanionInstructions.contains("ljg-read"))
+        #expect(!OpenAIService.freeCompanionInstructions.contains("### 碰撞"))
+        #expect(OpenAIService.freeModeBudgetInstructions.contains("120–300 个汉字"))
+        #expect(OpenAIService.freeModeBudgetInstructions.contains("max_output_tokens=\"900\""))
+        #expect(OpenAIService.freeChapterSummaryInstructions.contains("一个简短自然段"))
+        #expect(OpenAIService.freeChapterSummaryInstructions.contains("不要使用标题、列表"))
+        #expect(OpenAIService.fictionPageRangeSummaryInstructions.contains("所选页码范围"))
+        #expect(OpenAIService.fictionPageRangeSummaryInstructions.contains("不把它误写成完整章节"))
+        #expect(OpenAIService.fictionPageRangeSummaryInstructions.contains("无论输入页数多少"))
+        #expect(OpenAIService.fictionPageRangeSummaryInstructions.contains("150–250 个汉字"))
     }
 
     @Test func inlineChapterSummaryRequiresLogicalPointsAndChapterRelations() {
@@ -416,6 +449,48 @@ struct ReadingCompanionTests {
         #expect(source.contains("片段0-"))
         #expect(source.contains("片段5-"))
         #expect(source.contains("片段9-"))
+    }
+
+    @Test func fictionPageRangeSummaryKeepsOnlyTheInclusiveRequestedPages() throws {
+        let chunks = (0..<7).map {
+            TextChunk(pageIndex: $0, chapterTitle: nil, text: "第\($0 + 1)页")
+        }
+        let selected = ReaderModel.pageRangeContext(
+            chunks: chunks,
+            startPageIndex: 2,
+            endPageIndex: 4
+        )
+        #expect(selected.map(\.pageIndex) == [2, 3, 4])
+
+        let record = PageRangeSummaryRecord(startPage: 3, endPage: 5, summary: "一段概要")
+        let state = DocumentState(pageRangeSummaries: [record])
+        let restored = try JSONDecoder().decode(DocumentState.self, from: JSONEncoder().encode(state))
+        #expect(restored.pageRangeSummaries == [record])
+        #expect(record.pageLabel == "第 3–5 页")
+    }
+
+    @Test func fictionPageRangeSummaryNormalizesLongProviderOutput() {
+        let sentence = String(repeating: "情节继续向前推进", count: 7) + "。"
+        let summary = OpenAIService.normalizedFictionSummary(sentence + sentence + sentence)
+
+        #expect(summary.count >= 150)
+        #expect(summary.count <= 280)
+        #expect(summary.hasSuffix("。"))
+        #expect(!summary.contains("\n"))
+        #expect(OpenAIService.fictionSummaryInitialTokenLimit >= 2_500)
+        #expect(OpenAIService.fictionSummaryRetryTokenLimit >= 5_000)
+    }
+
+    @Test @MainActor func fictionPageRangeSummaryCanBeDeleted() {
+        let first = PageRangeSummaryRecord(startPage: 1, endPage: 2, summary: "第一条")
+        let second = PageRangeSummaryRecord(startPage: 3, endPage: 4, summary: "第二条")
+        let model = ReaderModel()
+        model.pageRangeSummaries = [first, second]
+
+        model.deletePageRangeSummary(id: first.id)
+
+        #expect(model.pageRangeSummaries == [second])
+        #expect(model.statusMessage == "第 1–2 页概要已删除")
     }
 
     @Test func chapterSummaryCompletenessRequiresAllMandatorySections() {
@@ -464,6 +539,57 @@ struct ReadingCompanionTests {
         #expect(state.lastPageIndex == 2)
         #expect(state.chapterSummaries == nil)
         #expect(state.outlineWasManuallyEdited == nil)
+        #expect(state.bookCategory == nil)
+        #expect(state.characters == nil)
+        #expect(state.characterHighlightsEnabled == nil)
+        #expect(state.ljgReadSkillEnabled == nil)
+    }
+
+    @Test func ljgReadSkillCanBeDisabledWithoutChangingBookMode() {
+        let enabled = OpenAIService.baseCompanionInstructions(companionMode: .academic, usesLJGReadSkill: true)
+        let disabled = OpenAIService.baseCompanionInstructions(companionMode: .academic, usesLJGReadSkill: false)
+        #expect(enabled.contains("<ljg_read_protocol"))
+        #expect(!disabled.contains("<ljg_read_protocol"))
+        #expect(disabled.contains("原文问答助手"))
+    }
+
+    @Test func bookCategoriesMapPermanentlyToTheirCompanionModes() {
+        #expect(BookCategory.nonfiction.companionMode == .academic)
+        #expect(BookCategory.fiction.companionMode == .free)
+        #expect(BookCategory.nonfiction.rawValue == "非虚构类")
+        #expect(BookCategory.fiction.rawValue == "虚构类")
+    }
+
+    @Test func characterAliasesAreUniqueAndPreferLongerNames() {
+        let character = BookCharacter(
+            name: "福尔摩斯",
+            aliases: ["福尔摩斯", "歇洛克", "夏洛克·福尔摩斯", "歇洛克"]
+        )
+        #expect(character.allNames == ["夏洛克·福尔摩斯", "福尔摩斯", "歇洛克"])
+    }
+
+    @Test @MainActor func characterBatchParserAcceptsReadableColonFormat() {
+        let parsed = ReaderModel.parseCharacterBatchLine("阿辽沙：卡拉马佐夫家的幼子，德米特里的弟弟")
+        #expect(parsed?.name == "阿辽沙")
+        #expect(parsed?.identity == "卡拉马佐夫家的幼子，德米特里的弟弟")
+        #expect(parsed?.relationship == "")
+        #expect(parsed?.aliases == [])
+    }
+
+    @Test @MainActor func characterColorsRemainUniqueBeyondTheOldPalette() {
+        let source = (0..<24).map { BookCharacter(name: "人物\($0)") }
+        let normalized = ReaderModel.assignUniqueCharacterColors(source)
+        let colors = normalized.compactMap(\.colorHex)
+        #expect(colors.count == 24)
+        #expect(Set(colors).count == 24)
+    }
+
+    @Test @MainActor func oldColonBatchRecordsAreMigratedOutOfTheNameField() {
+        let source = [BookCharacter(name: "圣地亚哥：记者，费尔民之子")]
+        let normalized = ReaderModel.assignUniqueCharacterColors(source)
+        #expect(normalized.first?.name == "圣地亚哥")
+        #expect(normalized.first?.identity == "记者，费尔民之子")
+        #expect(normalized.first?.relationship == "")
     }
 
     @Test func obsidianAIDiscussionsCanStartCollapsedOrExpanded() {
@@ -702,6 +828,15 @@ struct ReadingCompanionTests {
     @Test func searchSnippetStartsAtSentenceBeginningAndKeepsPunctuation() {
         let source = "前一句已经结束。这里讨论电 影 研 究的核心问题，并给出理由。后一句继续展开。"
         #expect(ReaderModel.searchSnippet(query: "电影研究", in: source) == "这里讨论电影研究的核心问题，并给出理由。")
+    }
+
+    @Test func repeatedSearchTermsProduceTheirOwnResultSnippets() {
+        let source = "第一句出现苹果。第二句再次出现苹果。第三句没有目标。"
+        let first = ReaderModel.searchSnippet(query: "苹果", in: source, occurrenceIndex: 0)
+        let second = ReaderModel.searchSnippet(query: "苹果", in: source, occurrenceIndex: 1)
+        #expect(first == "第一句出现苹果。")
+        #expect(second == "第二句再次出现苹果。")
+        #expect(first != second)
     }
 
     @Test func searchHighlightRangesCoverEveryVisibleMatch() {
@@ -1391,12 +1526,122 @@ struct ReadingCompanionTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try Data("%PDF-test".utf8).write(to: pdf)
         let store = DocumentStore(directoryURL: directory.appendingPathComponent("state", isDirectory: true))
-        await store.registerProject(url: pdf, title: "测试项目")
+        let cover = Data([0x89, 0x50, 0x4E, 0x47])
+        await store.registerProject(url: pdf, title: "测试项目", category: .fiction, coverPNGData: cover)
         let projects = await store.cachedProjects()
         #expect(projects.count == 1)
         #expect(projects.first?.title == "测试项目")
         #expect(projects.first?.sourcePath == pdf.path)
+        #expect(projects.first?.category == .fiction)
+        #expect(projects.first?.coverVersion == BookCoverRenderer.version)
+        #expect(projects.first?.coverPath.map { FileManager.default.fileExists(atPath: $0) } == true)
+        let savedCoverURL = try #require(projects.first?.coverPath.map(URL.init(fileURLWithPath:)))
+        await store.registerProject(
+            url: pdf,
+            title: "测试项目",
+            category: .fiction,
+            coverPNGData: Data([0x00, 0x01])
+        )
+        #expect(try Data(contentsOf: savedCoverURL) == cover)
         try? FileManager.default.removeItem(at: directory)
+    }
+
+    @Test func bookshelfFoldersOrganizeProjectsWithoutMovingSourceFiles() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ReadingCompanionFolderTest-\(UUID().uuidString)", isDirectory: true)
+        let pdf = directory.appendingPathComponent("novel.pdf")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("%PDF-folder".utf8).write(to: pdf)
+        let store = DocumentStore(directoryURL: directory.appendingPathComponent("state", isDirectory: true))
+        let project = await store.registerProject(url: pdf, title: "小说", category: .fiction)
+        let folder = try #require(await store.createBookshelfFolder(title: "文学"))
+        let secondFolder = try #require(await store.createBookshelfFolder(title: "待读"))
+        await store.setProjects([project], in: folder.id, included: true)
+        await store.setProjects([project], in: secondFolder.id, included: true)
+        #expect(await store.cachedProjects().first?.assignedFolderIDs == [folder.id, secondFolder.id])
+        #expect(FileManager.default.fileExists(atPath: pdf.path))
+        await store.deleteBookshelfFolder(folder)
+        #expect(await store.cachedProjects().first?.assignedFolderIDs == [secondFolder.id])
+        #expect(FileManager.default.fileExists(atPath: pdf.path))
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    @Test func legacyBooksRequireCategorySelectionOnceAfterPolicyUpgrade() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ReadingCompanionCategoryMigration-\(UUID().uuidString)", isDirectory: true)
+        let stateDirectory = directory.appendingPathComponent("state", isDirectory: true)
+        let pdf = directory.appendingPathComponent("legacy.pdf")
+        try FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
+        try Data("%PDF-legacy".utf8).write(to: pdf)
+        let store = DocumentStore(directoryURL: stateDirectory)
+        try await store.save(DocumentState(bookCategory: .fiction), for: pdf)
+        let legacy = CachedProject(
+            sourcePath: pdf.path,
+            title: "旧书",
+            lastOpenedAt: Date(),
+            category: .fiction
+        )
+        try JSONEncoder().encode([legacy]).write(
+            to: stateDirectory.appendingPathComponent("projects.json"),
+            options: .atomic
+        )
+
+        #expect(await store.cachedProjects().first?.category == nil)
+        #expect(await store.load(for: pdf).bookCategory == nil)
+
+        await store.registerProject(url: pdf, title: "旧书", category: .nonfiction)
+        #expect(await store.cachedProjects().first?.category == .nonfiction)
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    @Test func bookshelfBulkCategoryChangeUpdatesProjectsAndReadingState() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ReadingCompanionCategoryBatch-\(UUID().uuidString)", isDirectory: true)
+        let stateDirectory = directory.appendingPathComponent("state", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let firstURL = directory.appendingPathComponent("first.epub")
+        let secondURL = directory.appendingPathComponent("second.pdf")
+        try Data("epub".utf8).write(to: firstURL)
+        try Data("%PDF".utf8).write(to: secondURL)
+        let store = DocumentStore(directoryURL: stateDirectory)
+        let first = await store.registerProject(url: firstURL, title: "第一本", category: .fiction)
+        let second = await store.registerProject(url: secondURL, title: "第二本", category: .nonfiction)
+
+        await store.setProjects([first, second], category: .fiction)
+
+        let projects = await store.cachedProjects()
+        #expect(projects.count == 2)
+        #expect(projects.allSatisfy { $0.category == .fiction })
+        #expect(await store.load(for: firstURL).bookCategory == .fiction)
+        #expect(await store.load(for: secondURL).bookCategory == .fiction)
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    @Test func characterOccurrenceWindowCentersNearestAndBackfillsMissingSide() {
+        let pages = Array(0...20)
+        #expect(
+            ReaderModel.characterOccurrenceWindowRange(pageIndices: pages, currentPageIndex: 10)
+                == 5..<16
+        )
+        #expect(
+            ReaderModel.characterOccurrenceWindowRange(pageIndices: pages, currentPageIndex: 1)
+                == 0..<11
+        )
+        #expect(
+            ReaderModel.characterOccurrenceWindowRange(pageIndices: pages, currentPageIndex: 19)
+                == 10..<21
+        )
+        #expect(
+            ReaderModel.characterOccurrenceWindowRange(pageIndices: Array(0..<8), currentPageIndex: 4)
+                == 0..<8
+        )
+        #expect(
+            ReaderModel.characterOccurrenceWindowRange(
+                pageIndices: Array(repeating: 7, count: 20),
+                currentPageIndex: 7,
+                preferredIndex: 12
+            ) == 7..<18
+        )
     }
 
     @Test func bookshelfReusesAnEmptyWindowAndOnlyCreatesAWindowForASecondProject() {
@@ -1731,46 +1976,6 @@ struct ReadingCompanionTests {
         #expect(outline.map(\.pageIndex) == [3, 12, 22])
     }
 
-    @Test func doclingLayoutBlocksRemainSeparateTOCEntries() throws {
-        let json = """
-        {
-          "texts": [
-            {"label":"text","text":"目","prov":[{"page_no":1}]},
-            {"label":"text","text":"录","prov":[{"page_no":1}]},
-            {"label":"text","text":"从物到非物/001","prov":[{"page_no":1}]},
-            {"label":"text","text":"从占有到体验 /019","prov":[{"page_no":1}]},
-            {"label":"text","text":"智能手机 /029","prov":[{"page_no":1}]},
-            {"label":"text","text":"自拍；049","prov":[{"page_no":1}]},
-            {"label":"text","text":"物的脊背 1084","prov":[{"page_no":1}]},
-            {"label":"text","text":"鬼魂1092","prov":[{"page_no":1}]}
-          ]
-        }
-        """
-        let pages = try DoclingTOCJSONParser.parse(Data(json.utf8), sourcePageIndices: [2])
-        #expect(pages.count == 1)
-        #expect(pages[0].pageIndex == 2)
-        let entries = TOCReliableParser.parse(pages[0].text)
-        #expect(entries.map(\.title) == ["从物到非物", "从占有到体验", "智能手机", "自拍", "物的脊背", "鬼魂"])
-        #expect(entries.compactMap(\.printedPage) == [1, 19, 29, 49, 1_084, 1_092])
-    }
-
-    @Test func doclingPageNumbersMapBackToOriginalPDFPages() throws {
-        let json = """
-        {
-          "texts": [
-            {"label":"section_header","text":"第一章 起点 1","prov":[{"page_no":1}]},
-            {"label":"list_item","text":"1.1 问题 3","prov":[{"page_no":1}]},
-            {"label":"section_header","text":"第二章 推进 18","prov":[{"page_no":2}]},
-            {"label":"page_footer","text":"22","prov":[{"page_no":2}]}
-          ]
-        }
-        """
-        let pages = try DoclingTOCJSONParser.parse(Data(json.utf8), sourcePageIndices: [21, 22])
-        #expect(pages.map(\.pageIndex) == [21, 22])
-        #expect(pages[0].text.contains("第一章 起点 1"))
-        #expect(pages[1].text == "第二章 推进 18")
-    }
-
     @Test func resolverRepairsSlashReadAsLeadingOneInPrintedPage() {
         var pages = (0..<160).map { PageText(pageIndex: $0, text: "正文 \($0)", cameFromOCR: true) }
         pages[90].pageLabel = "84"
@@ -2020,8 +2225,10 @@ struct ReadingCompanionTests {
         let base = ReaderModel.answerCacheKey(question: "解释", context: [chunk], model: "m1", provider: .openAI, depth: .balanced, usesWebSearch: false, usesWholeBook: false, history: [])
         let otherModel = ReaderModel.answerCacheKey(question: "解释", context: [chunk], model: "m2", provider: .openAI, depth: .balanced, usesWebSearch: false, usesWholeBook: false, history: [])
         let otherContext = ReaderModel.answerCacheKey(question: "解释", context: [TextChunk(pageIndex: 3, text: "另一段")], model: "m1", provider: .openAI, depth: .balanced, usesWebSearch: false, usesWholeBook: false, history: [])
+        let freeMode = ReaderModel.answerCacheKey(question: "解释", context: [chunk], model: "m1", provider: .openAI, depth: .balanced, companionMode: .free, usesWebSearch: false, usesWholeBook: false, history: [])
         #expect(base != otherModel)
         #expect(base != otherContext)
+        #expect(base != freeMode)
     }
 
     @Test func oneLinePerEntryManualParsingDoesNotAppendTrailingDuplicates() {

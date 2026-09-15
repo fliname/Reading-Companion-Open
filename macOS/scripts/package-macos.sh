@@ -19,6 +19,9 @@ trap cleanup EXIT
 ditto "$PROJECT_DIR/dist/$APP_NAME" "$STAGING_DIR/$APP_NAME"
 ditto "$PROJECT_DIR/Resources/macOS-安装说明.txt" "$STAGING_DIR/安装说明.txt"
 ditto "$PROJECT_DIR/README.md" "$STAGING_DIR/README.md"
+if [[ -f "$PROJECT_DIR/MAC_RELEASE_${VERSION}.md" ]]; then
+  ditto "$PROJECT_DIR/MAC_RELEASE_${VERSION}.md" "$STAGING_DIR/MAC_RELEASE_${VERSION}.md"
+fi
 ditto "$PROJECT_DIR/QUICKSTART.md" "$STAGING_DIR/快速上手.md"
 ditto "$PROJECT_DIR/TROUBLESHOOTING.md" "$STAGING_DIR/故障排查.md"
 ditto "$PROJECT_DIR/PRIVACY.md" "$STAGING_DIR/隐私说明.md"

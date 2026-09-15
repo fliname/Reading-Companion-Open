@@ -1,7 +1,7 @@
 import PDFKit
 import SwiftUI
 
-private struct SelectionActionBar: View {
+struct SelectionActionBar: View {
     let selectedTint: HighlightTint
     let onHighlight: (HighlightTint) -> Void
     let onAnnotate: () -> Void
@@ -49,7 +49,7 @@ private struct SelectionActionBar: View {
     }
 }
 
-private struct AnnotationActionIcon: View {
+struct AnnotationActionIcon: View {
     var body: some View {
         Image(systemName: "note.text")
             .font(.system(size: 18))
@@ -61,7 +61,7 @@ private struct AnnotationActionIcon: View {
     }
 }
 
-private struct InlineAnnotationEditor: View {
+struct InlineAnnotationEditor: View {
     @State private var note: String
     let onSend: (String) -> Void
 
@@ -163,6 +163,41 @@ private struct AnnotationTextInput: NSViewRepresentable {
     }
 }
 
+enum PDFHighlightGeometry {
+    static func inkBounds(_ bounds: CGRect) -> CGRect {
+        CGRect(x: bounds.minX, y: bounds.minY + bounds.height * 0.12,
+               width: bounds.width, height: max(1, bounds.height * 0.70))
+    }
+}
+
+/// PDFKit's highlight appearance expands rounded ends beyond the line rectangle.
+/// A single flat fill keeps OCR word fragments continuous without covering line spacing.
+final class ReaderHighlightAnnotation: PDFAnnotation {
+    override func draw(with box: PDFDisplayBox, in context: CGContext) {
+        context.saveGState()
+        context.setBlendMode(.multiply)
+        context.setFillColor(color.cgColor)
+        context.fill(PDFHighlightGeometry.inkBounds(bounds))
+        context.restoreGState()
+    }
+}
+
+struct PDFViewportRegion: Equatable {
+    var normalized: CGRect
+
+    init(visible: CGRect, page: CGRect) {
+        let clipped = visible.intersection(page)
+        normalized = CGRect(x: (clipped.minX - page.minX) / page.width,
+                            y: (clipped.minY - page.minY) / page.height,
+                            width: clipped.width / page.width, height: clipped.height / page.height)
+    }
+
+    func rect(in page: CGRect) -> CGRect {
+        CGRect(x: page.minX + normalized.minX * page.width, y: page.minY + normalized.minY * page.height,
+               width: normalized.width * page.width, height: normalized.height * page.height)
+    }
+}
+
 final class CompanionPDFView: PDFView, NSPopoverDelegate {
     var highlightTint: HighlightTint = .yellow
     var highlightModeEnabled = false
@@ -172,6 +207,11 @@ final class CompanionPDFView: PDFView, NSPopoverDelegate {
             if zoomLocked {
                 lockedScaleFactor = scaleFactor
                 lockedHorizontalOrigin = enclosedScrollView?.contentView.bounds.origin.x
+                if let page = currentPage {
+                    lockedViewport = PDFViewportRegion(visible: convert(bounds, to: page), page: page.bounds(for: displayBox))
+                    lockedPage = document?.index(for: page)
+                }
+                autoScales = false
                 previousHorizontalScrollerVisibility = enclosedScrollView?.hasHorizontalScroller
                 enclosedScrollView?.horizontalScrollElasticity = .none
                 enclosedScrollView?.hasHorizontalScroller = false
@@ -181,6 +221,8 @@ final class CompanionPDFView: PDFView, NSPopoverDelegate {
             } else {
                 lockedScaleFactor = nil
                 lockedHorizontalOrigin = nil
+                lockedViewport = nil
+                lockedPage = nil
                 if let previousHorizontalScrollerVisibility {
                     enclosedScrollView?.hasHorizontalScroller = previousHorizontalScrollerVisibility
                 }
@@ -204,6 +246,11 @@ final class CompanionPDFView: PDFView, NSPopoverDelegate {
     var onNavigate: ((Int) -> Void)?
     var onSelectionContinuationChanged: ((Int) -> Void)?
     private var lockedScaleFactor: CGFloat?
+    private var lockedViewport: PDFViewportRegion?
+    private var lockedPage: Int?
+    private var applyingViewport = false
+    var suppressNavigationReports = false
+    var initialPageIndex: Int?
     private var lockedHorizontalOrigin: CGFloat?
     private var previousHorizontalScrollerVisibility: Bool?
     private weak var observedClipView: NSClipView?
@@ -301,7 +348,7 @@ final class CompanionPDFView: PDFView, NSPopoverDelegate {
         for fragment in pendingSelectionFragments {
             guard let page = document.page(at: fragment.pageIndex) else { continue }
             let bounds = fragment.bounds.cgRect
-            let annotation = PDFAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
+            let annotation = ReaderHighlightAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
             annotation.color = highlightTint.color
             annotation.userName = record?.id.uuidString
             page.addAnnotation(annotation)
@@ -459,7 +506,7 @@ final class CompanionPDFView: PDFView, NSPopoverDelegate {
         guard let document else { return }
         for fragment in HighlightFragmentNormalizer.normalize(fragments) {
             guard let page = document.page(at: fragment.pageIndex) else { continue }
-            let annotation = PDFAnnotation(
+            let annotation = ReaderHighlightAnnotation(
                 bounds: fragment.bounds.cgRect,
                 forType: .highlight,
                 withProperties: nil
@@ -551,6 +598,12 @@ final class CompanionPDFView: PDFView, NSPopoverDelegate {
 
     override func layout() {
         super.layout()
+        if let initialPageIndex, bounds.width > 0, bounds.height > 0,
+           let page = document?.page(at: initialPageIndex) {
+            self.initialPageIndex = nil
+            navigate(to: page)
+            DispatchQueue.main.async { [weak self] in self?.reportCurrentPage() }
+        }
         if zoomLocked { updateLockObservation() }
         enforceNavigationLock()
     }
@@ -564,7 +617,14 @@ final class CompanionPDFView: PDFView, NSPopoverDelegate {
             clearPendingSelection()
             return
         }
-        super.keyDown(with: event)
+        if [123, 124, 116, 121].contains(event.keyCode), let document, let currentPage {
+            let step = (displayMode == .twoUpContinuous || displayMode == .twoUp) ? 2 : 1
+            let direction = (event.keyCode == 123 || event.keyCode == 116) ? -1 : 1
+            let index = min(max(0, document.index(for: currentPage) + direction * step), document.pageCount - 1)
+            if let page = document.page(at: index) { navigate(to: page) }
+        } else {
+            super.keyDown(with: event)
+        }
         enforceNavigationLock()
         reportCurrentPage()
     }
@@ -645,9 +705,48 @@ final class CompanionPDFView: PDFView, NSPopoverDelegate {
         NotificationCenter.default.removeObserver(self)
     }
 
+    func navigate(to page: PDFPage) {
+        let wasSuppressed = suppressNavigationReports
+        suppressNavigationReports = true
+        go(to: page)
+        restoreLockedViewport(on: page)
+        suppressNavigationReports = wasSuppressed
+    }
+
+    private func restoreLockedViewport(on page: PDFPage) {
+        guard zoomLocked, !applyingViewport, let lockedViewport, let document else { return }
+        applyingViewport = true
+        defer { applyingViewport = false }
+        lockedPage = document.index(for: page)
+        let region = lockedViewport.rect(in: page.bounds(for: displayBox))
+        guard region.width > 0, region.height > 0 else { return }
+        let viewportWidth = bounds.width / (displayMode == .twoUpContinuous || displayMode == .twoUp ? 2 : 1)
+        let scale = min(viewportWidth / region.width, bounds.height / region.height)
+        lockedScaleFactor = scale
+        autoScales = false
+        scaleFactor = scale
+        layoutDocumentView()
+        guard let scrollView = enclosedScrollView, let documentView = scrollView.documentView else { return }
+        let viewRegion = convert(region, from: page)
+        let documentRegion = documentView.convert(viewRegion, from: self)
+        var proposed = scrollView.contentView.bounds
+        if displayMode == .twoUpContinuous || displayMode == .twoUp {
+            proposed.origin.x = lockedHorizontalOrigin ?? proposed.origin.x
+        } else {
+            proposed.origin.x = documentRegion.midX - proposed.width / 2
+        }
+        proposed.origin.y = documentRegion.midY - proposed.height / 2
+        let constrained = scrollView.contentView.constrainBoundsRect(proposed)
+        lockedHorizontalOrigin = constrained.origin.x
+        scrollView.contentView.scroll(to: constrained.origin)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
     func reportCurrentPage() {
-        guard let currentPage, let document else { return }
-        onNavigate?(document.index(for: currentPage))
+        guard initialPageIndex == nil, !suppressNavigationReports, !applyingViewport, let currentPage, let document else { return }
+        let index = document.index(for: currentPage)
+        if zoomLocked, lockedPage != index { restoreLockedViewport(on: currentPage) }
+        onNavigate?(index)
     }
 }
 
@@ -698,14 +797,26 @@ struct PDFReaderView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: CompanionPDFView, context: Context) {
+        view.suppressNavigationReports = true
+        defer { view.suppressNavigationReports = false }
+        let requestedTarget = model.navigationTarget
         if view.document !== model.document {
             view.resetSelectionContinuation()
+            view.initialPageIndex = requestedTarget ?? model.currentPageIndex
             view.document = model.document
             context.coordinator.lastTarget = nil
+            context.coordinator.lastFitMode = nil
             context.coordinator.lastSearchQuery = nil
+            context.coordinator.lastCharacterSignature = nil
         }
         synchronizeHighlights(in: view)
-        view.displayMode = .singlePageContinuous
+        let displayMode: PDFDisplayMode = model.pdfTwoPages ? .twoUpContinuous : .singlePageContinuous
+        let modeChanged = view.displayMode != displayMode
+        let previousPage = view.currentPage
+        if modeChanged {
+            view.displayMode = displayMode
+            context.coordinator.lastFitMode = nil
+        }
         view.displaysAsBook = false
         view.highlightTint = model.highlightTint
         view.highlightModeEnabled = model.highlightModeEnabled
@@ -714,7 +825,7 @@ struct PDFReaderView: NSViewRepresentable {
             view.presentAnnotationEditor(for: record)
         }
 
-        if context.coordinator.lastFitMode != model.fitMode {
+        if !model.zoomLocked && context.coordinator.lastFitMode != model.fitMode {
             switch model.fitMode {
             case .page:
                 view.autoScales = true
@@ -726,39 +837,55 @@ struct PDFReaderView: NSViewRepresentable {
                 view.scaleFactor = model.zoomScale
             }
             context.coordinator.lastFitMode = model.fitMode
-        } else if model.fitMode == .custom, abs(view.scaleFactor - model.zoomScale) > 0.001 {
+        } else if !model.zoomLocked, model.fitMode == .custom, abs(view.scaleFactor - model.zoomScale) > 0.001 {
             view.autoScales = false
             view.scaleFactor = model.zoomScale
         }
 
-        if let target = model.navigationTarget,
+        if let target = requestedTarget,
+           view.initialPageIndex == nil,
            target != context.coordinator.lastTarget,
            let page = model.document?.page(at: target) {
-            view.go(to: page)
             context.coordinator.lastTarget = target
+            view.navigate(to: page)
+        } else if modeChanged, let previousPage {
+            view.navigate(to: previousPage)
         }
+        if requestedTarget == nil { context.coordinator.lastTarget = nil }
 
-        if context.coordinator.lastSearchQuery != model.searchHighlightQuery {
+        let visibleCharacters = model.characterHighlightsEnabled ? model.characters : []
+        let characterSignature = "enabled=\(model.characterHighlightsEnabled);" + visibleCharacters.map {
+            "\($0.id.uuidString)|\($0.colorHex ?? $0.tint.rawValue)|\($0.allNames.joined(separator: ","))"
+        }.joined(separator: ";")
+        if context.coordinator.lastSearchQuery != model.searchHighlightQuery
+            || context.coordinator.lastCharacterSignature != characterSignature {
             let query = model.searchHighlightQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-            let selections = query.isEmpty ? [] : searchSelections(for: query, in: model.document)
-            selections.forEach { $0.color = NSColor.systemYellow.withAlphaComponent(0.68) }
-            view.highlightedSelections = selections
-            context.coordinator.lastSearchQuery = model.searchHighlightQuery
-        }
-    }
-
-    private func searchSelections(for query: String, in document: PDFDocument?) -> [PDFSelection] {
-        guard let document else { return [] }
-        var selections: [PDFSelection] = []
-        for pageIndex in 0..<document.pageCount {
-            guard let page = document.page(at: pageIndex), let text = page.string else { continue }
-            for range in ReaderModel.searchMatchRanges(query: query, in: text) {
-                if let selection = page.selection(for: NSRange(range, in: text)) {
-                    selections.append(selection)
+            let searchSelections = query.isEmpty ? [] : PDFSearchHighlighter.selections(for: query, in: model.document)
+            searchSelections.forEach { $0.color = NSColor.systemYellow.withAlphaComponent(0.68) }
+            var characterSelections: [PDFSelection] = []
+            for character in visibleCharacters {
+                let matches = character.allNames.flatMap {
+                    PDFSearchHighlighter.selections(for: $0, in: model.document)
+                }.sorted { lhs, rhs in
+                    guard let document = model.document,
+                          let leftPage = lhs.pages.first,
+                          let rightPage = rhs.pages.first else { return false }
+                    return document.index(for: leftPage) < document.index(for: rightPage)
                 }
+                for (index, selection) in matches.enumerated() {
+                    selection.color = character.color.withAlphaComponent(index == 0 ? 0.58 : 0.34)
+                }
+                characterSelections.append(contentsOf: matches)
             }
+            view.highlightedSelections = characterSelections + searchSelections
+            context.coordinator.lastSearchQuery = model.searchHighlightQuery
+            context.coordinator.lastCharacterSignature = characterSignature
         }
-        return selections
+        context.coordinator.navigateToSearchResultIfNeeded(
+            command: model.searchNavigationCommand,
+            target: model.searchNavigationTarget,
+            in: view
+        )
     }
 
     private func synchronizeHighlights(in view: CompanionPDFView) {
@@ -796,7 +923,9 @@ struct PDFReaderView: NSViewRepresentable {
                     existing.contents = record.note
                     continue
                 }
-                let annotation = PDFAnnotation(bounds: bounds, forType: annotationType, withProperties: nil)
+                let annotation = annotationType == .highlight
+                    ? ReaderHighlightAnnotation(bounds: bounds, forType: annotationType, withProperties: nil)
+                    : PDFAnnotation(bounds: bounds, forType: annotationType, withProperties: nil)
                 annotation.color = annotationColor
                 annotation.userName = record.id.uuidString
                 annotation.contents = record.note
@@ -811,6 +940,8 @@ struct PDFReaderView: NSViewRepresentable {
         var lastTarget: Int?
         var lastFitMode: ReaderFitMode?
         var lastSearchQuery: String?
+        var lastCharacterSignature: String?
+        var lastSearchNavigationCommand = 0
 
         init(model: ReaderModel) { self.model = model }
 
@@ -819,6 +950,56 @@ struct PDFReaderView: NSViewRepresentable {
             view.reportCurrentPage()
         }
 
+        func navigateToSearchResultIfNeeded(
+            command: Int,
+            target: SearchRecord?,
+            in view: CompanionPDFView
+        ) {
+            guard command != lastSearchNavigationCommand, let target else { return }
+            lastSearchNavigationCommand = command
+            let query = (target.query ?? model?.searchHighlightQuery ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let matches = PDFSearchHighlighter.selections(for: query, in: view.document).filter { selection in
+                guard let page = selection.pages.first, let document = view.document else { return false }
+                return document.index(for: page) == target.pageIndex
+            }
+            if matches.indices.contains(target.occurrenceIndexInPage) {
+                view.go(to: matches[target.occurrenceIndexInPage])
+            } else if let page = view.document?.page(at: target.pageIndex) {
+                view.navigate(to: page)
+            }
+            lastTarget = target.pageIndex
+        }
+
         deinit { NotificationCenter.default.removeObserver(self) }
+    }
+}
+
+/// Uses PDFKit's own text search for ordinary matches because those selections
+/// carry the exact glyph geometry from the PDF text layer. Reconstructing a
+/// selection from `page.string` offsets can drift on ligatures, composed
+/// Unicode, custom encodings, or generated EPUB pages. The offset-based path is
+/// retained only for normalized matches (for example OCR-inserted CJK spaces)
+/// on pages where native PDF search found nothing.
+enum PDFSearchHighlighter {
+    static func selections(for query: String, in document: PDFDocument?) -> [PDFSelection] {
+        guard let document else { return [] }
+        let nativeSelections = document.findString(
+            query,
+            withOptions: [.caseInsensitive, .diacriticInsensitive]
+        )
+        var selections = nativeSelections
+        let pagesWithNativeMatches = Set(nativeSelections.flatMap(\.pages).map { document.index(for: $0) })
+
+        for pageIndex in 0..<document.pageCount {
+            guard !pagesWithNativeMatches.contains(pageIndex) else { continue }
+            guard let page = document.page(at: pageIndex), let text = page.string else { continue }
+            for range in ReaderModel.searchMatchRanges(query: query, in: text) {
+                if let selection = page.selection(for: NSRange(range, in: text)) {
+                    selections.append(selection)
+                }
+            }
+        }
+        return selections
     }
 }

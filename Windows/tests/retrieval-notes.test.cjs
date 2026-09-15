@@ -37,6 +37,20 @@ test('Obsidian AI 对话写入准确章节并默认展开', async () => {
   assert.ok(result.indexOf('[!example]') < result.indexOf('### 第一节'));
 });
 
+test('Obsidian 新笔记以属性开头并用蓝色区分批注文字', async () => {
+  const { highlightBlock, skeleton } = await import('../src/shared/notes.mjs');
+  const notebook = skeleton('测试"书', [], 'C:\\Books\\测试书.epub');
+  assert.match(notebook, /^---\ntitle: "测试\\"书"\ntype: reading-note\n/);
+  assert.match(notebook, /source: "C:\\\\Books\\\\测试书\.epub"/);
+  assert.match(notebook, /format: "epub"/);
+  assert.match(notebook, /tags:\n  - reading-companion\n---/);
+  const annotation = highlightBlock({ kind: 'annotation', pageIndex: 2, text: '原文', note: '批注内容' });
+  assert.match(annotation, /原文：/);
+  assert.match(annotation, /<span style="color: #3b82f6;">批注内容<\/span>/);
+  const highlightedNote = highlightBlock({ kind: 'highlight', color: 'yellow', pageIndex: 2, text: '原文', note: '补充批注' });
+  assert.match(highlightedNote, /\[!note\] 批注[\s\S]*color: #3b82f6/);
+});
+
 test('PDF 双栏文本按左栏完整读完再读右栏', async () => {
   const { reconstructText } = await import('../src/shared/pdf-layout.mjs');
   const items = [];
@@ -115,11 +129,12 @@ test('划线与批注搜索同时匹配原文和批注内容', async () => {
   assert.equal(markMatchesQuery(mark, '不存在'), false);
 });
 
-test('Ctrl 连续划线以圆点和换行组合并保留单段原貌', async () => {
+test('Ctrl 跨页划线无空格拼接为一句完整原文', async () => {
   const { formatSelectionParts, normalizeGroupedSelectionText } = await import('../src/shared/selection-group.mjs');
   assert.equal(formatSelectionParts(['第一处内容']), '第一处内容');
-  assert.equal(formatSelectionParts(['第一处内容', '第二处内容']), '• 第一处内容\n• 第二处内容');
-  assert.equal(normalizeGroupedSelectionText('• 第一处 内容\n• 第二处 内容'), '• 第一处内容\n• 第二处内容');
+  assert.equal(formatSelectionParts(['这是横跨第一', '页的一句话。']), '这是横跨第一页的一句话。');
+  assert.equal(normalizeGroupedSelectionText('• 这是横跨第一\n• 页的一句话。'), '这是横跨第一页的一句话。');
+  assert.equal(normalizeGroupedSelectionText('这是横跨第一\n页的一句话。'), '这是横跨第一页的一句话。');
 });
 
 test('扫描页搜索按 OCR 逐词坐标生成精确高亮框', async () => {

@@ -1,5 +1,19 @@
 const activeRequests = new Map();
 
+const freeCompanionInstructions = '\n\n你是 Reading Companion 的虚构类伴读，主要陪读小说、戏剧和其他叙事文本。直接回答读者提出的事实问题；需要文学分析时，只做与当前问题有关的适度分析。严格依据提供的原文，不编造人物、情节、页码或作者意图；证据不足就简短说明。默认使用中文，不加载学术伴读框架，不追加碰撞问题，不强制小标题、列表或固定结构。';
+const freeModeBudgetInstructions = '\n\n默认用 120–300 个汉字完成回答；简单事实问题尽量在 1–3 句内回答，文学分析最多使用三个短段。只保留直接答案和必要依据，不重复问题，不写开场白、总结或延伸提问，并在篇幅内完整结束。';
+
+const fictionPageRangeSummaryInstructions = `请用 150–250 个汉字概括这段小说片段的主要事件和人物动态。
+要求：
+- 概述发生了什么（行动/事件），不要照抄原文
+- 点明涉及的主要人物及其动作/态度变化
+- 如果有情感转折或悬念，简要提及
+- 不要评价文学质量，不要引用原文超过 20 字
+- 最后一句必须完整结束`;
+
+const fictionSummaryInitialTokenLimit = 2500;
+const fictionSummaryRetryTokenLimit = 5000;
+
 function normalizeBaseURL(value = '') {
   const trimmed = value.trim().replace(/\/+$/, '')
     .replace(/\/(?:chat\/completions|responses|models)$/i, '');
@@ -30,18 +44,88 @@ async function requestAI(request, onProgress) {
   const controller = new AbortController();
   activeRequests.set(request.id, controller);
   try {
+    if (request.companionMode === 'free') {
+      request = {
+        ...request,
+        system: request.system || `${freeCompanionInstructions}${freeModeBudgetInstructions}`,
+        cacheKey: `${request.cacheKey || request.id || ''}::companion:${request.companionMode}`
+      };
+    }
     const kind = providerKind(request.baseURL, request.apiKey);
-    const result = kind === 'anthropic'
-      ? await requestAnthropic(request, controller.signal, onProgress)
+    const send = candidate => kind === 'anthropic'
+      ? requestAnthropic(candidate, controller.signal, onProgress)
       : kind === 'gemini'
-        ? await requestGemini(request, controller.signal, onProgress)
-        : await requestOpenAICompatible(request, controller.signal, onProgress);
-    if (!result.usage?.inputTokens) result.usage.inputTokens = estimateTokens(`${request.system}\n${request.messages.map(message => message.content).join('\n')}`);
-    if (!result.usage?.outputTokens) result.usage.outputTokens = estimateTokens(result.text);
-    return result;
+        ? requestGemini(candidate, controller.signal, onProgress)
+        : requestOpenAICompatible(candidate, controller.signal, onProgress);
+    const maximumContinuations = Math.min(3, Math.max(0, Number(request.maxContinuations) || 0));
+    let messages = request.messages;
+    let text = '';
+    let usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 };
+    let continuationCount = 0;
+    let truncated = false;
+
+    for (let attempt = 0; attempt <= maximumContinuations; attempt += 1) {
+      const result = await send({
+        ...request,
+        messages,
+        // A continuation should spend its budget on completing the visible
+        // answer instead of repeating another long hidden reasoning pass.
+        reasoningEffort: attempt > 0 ? 'low' : request.reasoningEffort
+      });
+      text += result.text || '';
+      usage = addUsage(usage, result.usage);
+      truncated = !!result.truncated;
+      if (!truncated) break;
+      if (attempt >= maximumContinuations) break;
+      continuationCount += 1;
+      messages = [
+        ...request.messages,
+        ...(text ? [{ role: 'assistant', content: text }] : []),
+        {
+          role: 'user',
+          content: text
+            ? '刚才的回答因输出上限中断。请直接从中断处继续，不要重复已有内容；用更紧凑的措辞补全剩余论证，并自然结束。'
+            : '刚才的推理耗尽了输出额度但没有产生可见答案。请降低内部推理篇幅，直接给出完整、紧凑且自然收束的回答。'
+        }
+      ];
+    }
+    let usedCompactRescue = false;
+    if (truncated) {
+      usedCompactRescue = true;
+      continuationCount += 1;
+      const rescue = await send({
+        ...request,
+        messages: [
+          ...request.messages,
+          ...(text ? [{ role: 'assistant', content: text }] : []),
+          {
+            role: 'user',
+            content: '只补写尚未完成的结论并立即收束。不要重复已有内容，不再展开新分支；控制在 600 个汉字以内，确保最后一句完整结束。'
+          }
+        ],
+        maxTokens: Math.min(1800, request.maxTokens),
+        reasoningEffort: 'low'
+      });
+      text += rescue.text || '';
+      usage = addUsage(usage, rescue.usage);
+      truncated = !!rescue.truncated;
+    }
+    if (!usage.inputTokens) usage.inputTokens = estimateTokens(`${request.system}\n${request.messages.map(message => message.content).join('\n')}`);
+    if (!usage.outputTokens) usage.outputTokens = estimateTokens(text);
+    if (!text.trim()) throw new Error('AI 服务没有返回可见答案，请检查模型状态后重试。');
+    return { text, usage, continuationCount, incomplete: truncated, usedCompactRescue };
   } finally {
     activeRequests.delete(request.id);
   }
+}
+
+function addUsage(total, usage = {}) {
+  return {
+    inputTokens: total.inputTokens + (Number(usage.inputTokens) || 0),
+    outputTokens: total.outputTokens + (Number(usage.outputTokens) || 0),
+    cachedTokens: total.cachedTokens + (Number(usage.cachedTokens) || 0),
+    reasoningTokens: total.reasoningTokens + (Number(usage.reasoningTokens) || 0)
+  };
 }
 
 async function requestOpenAICompatible(request, signal, onProgress) {
@@ -82,8 +166,8 @@ async function requestOpenAICompatible(request, signal, onProgress) {
     const payload = await response.json();
     const text = payload.choices?.map(choice => choice.message?.content || choice.text || '').join('') || payload.output_text || '';
     if (text) onProgress?.(text);
-    if (payload.choices?.some(choice => choice.finish_reason === 'length')) throw new Error('AI 达到输出上限，未返回完整答案。请改用更深的阅读模式或缩小问题范围。');
-    return { text, usage: usageFrom(payload) };
+    const truncated = payload.choices?.some(choice => ['length', 'max_tokens', 'max_output_tokens'].includes(choice.finish_reason));
+    return { text, usage: usageFrom(payload), truncated };
   }
   if (!response.body) throw new Error('AI 服务没有返回响应流。');
   const reader = response.body.getReader();
@@ -113,8 +197,7 @@ async function requestOpenAICompatible(request, signal, onProgress) {
       if (event.choices?.some(choice => choice.finish_reason === 'length')) truncated = true;
     }
   }
-  if (truncated) throw new Error('AI 达到输出上限，未返回完整答案。请改用更深的阅读模式或缩小问题范围。');
-  return { text, usage };
+  return { text, usage, truncated };
 }
 
 async function requestAnthropic(request, signal, onProgress) {
@@ -140,7 +223,7 @@ async function requestAnthropic(request, signal, onProgress) {
   const payload = await response.json();
   const text = (payload.content || []).filter(item => item.type === 'text').map(item => item.text).join('\n\n');
   if (text) onProgress?.(text);
-  return { text, usage: usageFrom(payload) };
+  return { text, usage: usageFrom(payload), truncated: payload.stop_reason === 'max_tokens' };
 }
 
 async function requestGemini(request, signal, onProgress) {
@@ -163,7 +246,8 @@ async function requestGemini(request, signal, onProgress) {
   const payload = await response.json();
   const text = payload.candidates?.flatMap(candidate => candidate.content?.parts || []).map(part => part.text || '').join('\n\n') || '';
   if (text) onProgress?.(text);
-  return { text, usage: usageFrom(payload) };
+  const truncated = payload.candidates?.some(candidate => ['MAX_TOKENS', 'MAX_OUTPUT_TOKENS'].includes(candidate.finishReason));
+  return { text, usage: usageFrom(payload), truncated };
 }
 
 async function providerError(response) {
@@ -255,4 +339,78 @@ function cancelAI(id) {
   return true;
 }
 
-module.exports = { requestAI, cancelAI, listModels, detectOfficialProvider, normalizeBaseURL, providerKind, usageFrom, estimateTokens };
+async function generateFictionPageRangeSummary(request, onProgress) {
+  const controller = new AbortController();
+  activeRequests.set(request.id, controller);
+  try {
+    const kind = providerKind(request.baseURL, request.apiKey);
+    const send = candidate => kind === 'anthropic'
+      ? requestAnthropic(candidate, controller.signal, onProgress)
+      : kind === 'gemini'
+        ? requestGemini(candidate, controller.signal, onProgress)
+        : requestOpenAICompatible(candidate, controller.signal, onProgress);
+    const baseRequest = {
+      ...request,
+      system: fictionPageRangeSummaryInstructions
+    };
+    let text = '';
+    let usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 };
+    let truncated = false;
+    const initial = await send({
+      ...baseRequest,
+      maxTokens: fictionSummaryInitialTokenLimit
+    });
+    text = initial.text || '';
+    usage = addUsage(usage, initial.usage);
+    truncated = !!initial.truncated;
+    if (truncated) {
+      const retry = await send({
+        ...baseRequest,
+        maxTokens: fictionSummaryRetryTokenLimit,
+        messages: [
+          ...request.messages,
+          ...(text ? [{ role: 'assistant', content: text }] : []),
+          {
+            role: 'user',
+            content: '刚才的回答因输出上限中断。请从中断处继续，不要重复已有内容，并自然结束。'
+          }
+        ]
+      });
+      text += retry.text || '';
+      usage = addUsage(usage, retry.usage);
+      truncated = !!retry.truncated;
+    }
+    if (!text.trim()) throw new Error('AI 服务没有返回可见答案，请检查模型状态后重试。');
+    return { text: normalizeFictionSummary(text), usage, incomplete: truncated };
+  } finally {
+    activeRequests.delete(request.id);
+  }
+}
+
+function normalizeFictionSummary(text = '') {
+  const normalized = String(text).trim();
+  const chars = [...normalized];
+  let hanCount = 0;
+  let cutoffIndex = -1;
+  for (let i = 0; i < chars.length; i += 1) {
+    if (/\p{Script=Han}/u.test(chars[i])) {
+      hanCount += 1;
+      if (hanCount === 250) cutoffIndex = i;
+    }
+  }
+  if (hanCount <= 250) return normalized;
+  const sentenceEnders = new Set(['。', '！', '？', '.', '!', '?']);
+  let lastSentenceEnd = -1;
+  for (let i = cutoffIndex; i >= 0; i -= 1) {
+    if (sentenceEnders.has(chars[i])) {
+      lastSentenceEnd = i;
+      break;
+    }
+  }
+  if (lastSentenceEnd >= 0) {
+    return chars.slice(0, lastSentenceEnd + 1).join('');
+  }
+  return chars.slice(0, cutoffIndex + 1).join('');
+}
+
+module.exports = { requestAI, cancelAI, listModels, detectOfficialProvider, normalizeBaseURL, providerKind, usageFrom, estimateTokens, addUsage, generateFictionPageRangeSummary, normalizeFictionSummary, fictionPageRangeSummaryInstructions, freeCompanionInstructions, freeModeBudgetInstructions };

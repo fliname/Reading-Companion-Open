@@ -6,7 +6,7 @@ RequestExecutionLevel user
 !include "MUI2.nsh"
 
 !define PRODUCT_NAME "Reading Companion Open"
-!define PRODUCT_VERSION "0.43.18"
+!define PRODUCT_VERSION "0.44.3"
 !define PRODUCT_PUBLISHER "Reading Companion contributors"
 !define PRODUCT_EXE "Reading Companion Open.exe"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Reading Companion Open"

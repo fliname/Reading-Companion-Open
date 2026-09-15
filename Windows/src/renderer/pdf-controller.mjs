@@ -1,5 +1,6 @@
 import * as pdfjsLib from './vendor/pdf.mjs';
 import { EventBus, PDFViewer, PDFLinkService, PDFFindController } from './vendor/pdf_viewer.mjs';
+import { visiblePageRegion, lockedPageScale, highlightLineRects } from '../shared/pdf-reading-geometry.mjs';
 import { normalizeText } from '../shared/retrieval.mjs';
 import { reconstructText } from '../shared/pdf-layout.mjs';
 import { normalizeOCRLines, rotateNormalizedBox } from '../shared/ocr-layer.mjs';
@@ -52,11 +53,18 @@ export class PDFController {
     this.pages = [];
     this.marks = [];
     this.locked = false;
+    this.spreadCount = 1;
+    this.lockedRegion = null;
+    this.lockedScrollLeft = 0;
+    this.lockRestoreGeneration = 0;
+    this.restoringLock = false;
     this.rotation = 0;
     this.highlightMode = false;
     this.highlightColor = 'yellow';
     this.searchQuery = '';
     this.searchFragments = [];
+    this.searchTarget = null;
+    this.characters = [];
     this.pendingSelection = { text: [], fragments: [] };
     this.ocrDragStart = null;
     this.ocrDragFrame = null;
@@ -74,7 +82,11 @@ export class PDFController {
       this.pdfViewer.currentScaleValue = 'page-width';
       this.renderMarks();
     });
-    this.eventBus.on('pagechanging', event => this.onPageChange?.(event.pageNumber - 1));
+    this.eventBus.on('pagechanging', event => {
+      const pageIndex = this.spreadCount === 2 ? Math.floor((event.pageNumber - 1) / 2) * 2 : event.pageNumber - 1;
+      if (this.locked && !this.restoringLock) this.restoreLockedRegion(pageIndex);
+      this.onPageChange?.(pageIndex);
+    });
     this.eventBus.on('scalechanging', () => this.onScaleChange?.(this.pdfViewer.currentScale));
     this.eventBus.on('pagerendered', event => {
       const pageIndex = (event.pageNumber || 1) - 1;
@@ -87,16 +99,18 @@ export class PDFController {
       this.renderMarks();
       this.renderOCRTextLayer(pageIndex);
       this.renderSearchHighlights(pageIndex);
+      this.renderCharacterHighlights(pageIndex);
     });
     this.eventBus.on('textlayerrendered', event => {
       const pageIndex = (event.pageNumber || 1) - 1;
       this.renderOCRTextLayer(pageIndex);
       this.renderSearchHighlights(pageIndex);
+      this.renderCharacterHighlights(pageIndex);
     });
     this.container.addEventListener('mousedown', event => this.handleMouseDown(event));
     this.container.addEventListener('mousemove', event => this.handleMouseMove(event));
     this.container.addEventListener('mouseup', event => this.handleMouseUp(event));
-    this.container.addEventListener('scroll', () => { if (this.locked && this.container.scrollLeft !== 0) this.container.scrollLeft = 0; }, { passive: true });
+    this.container.addEventListener('scroll', () => { if (this.locked && !this.restoringLock && this.container.scrollLeft !== this.lockedScrollLeft) this.container.scrollLeft = this.lockedScrollLeft; }, { passive: true });
     this.container.addEventListener('wheel', event => {
       if (event.ctrlKey || event.metaKey) {
         event.preventDefault();
@@ -105,16 +119,16 @@ export class PDFController {
       }
       if (!this.locked) return;
       if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) event.preventDefault();
-      this.container.scrollLeft = 0;
+      this.container.scrollLeft = this.lockedScrollLeft;
     }, { passive: false });
     this.container.addEventListener('pointerdown', event => this.handleTouchPointer(event), { passive: false });
     this.container.addEventListener('pointermove', event => this.handleTouchPointer(event), { passive: false });
     this.container.addEventListener('pointerup', event => this.releaseTouchPointer(event), { passive: false });
     this.container.addEventListener('pointercancel', event => this.releaseTouchPointer(event), { passive: false });
     document.addEventListener('keydown', event => {
-      if (event.target?.matches('textarea,input,[contenteditable=true]')) return;
-      if (event.key === 'ArrowDown') { event.preventDefault(); this.nextPage(); }
-      if (event.key === 'ArrowUp') { event.preventDefault(); this.previousPage(); }
+      if (this.container.classList.contains('hidden') || event.target?.matches('textarea,input,select,[contenteditable=true]')) return;
+      if (event.key === 'ArrowDown' || event.key === 'ArrowRight') { event.preventDefault(); this.nextPage(); }
+      if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') { event.preventDefault(); this.previousPage(); }
     });
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
@@ -195,7 +209,9 @@ export class PDFController {
     if (this.activeTouches.size < 2) this.pinchStart = null;
   }
 
-  async load(data) {
+  async load(data, { initialPageIndex = 0, spreadCount = 1 } = {}) {
+    this.setLocked(false);
+    this.spreadCount = spreadCount === 2 ? 2 : 1;
     this.onStatus?.('正在打开 PDF…');
     this.pages = [];
     if (this.pdfDocument) {
@@ -204,7 +220,7 @@ export class PDFController {
       this.pdfViewer.setDocument(null);
       this.linkService.setDocument(null);
       this.findController.setDocument(null);
-      await previousDocument.destroy().catch(error => console.warn('Unable to release previous PDF', error));
+      await previousDocument.loadingTask.destroy().catch(error => console.warn('Unable to release previous PDF', error));
     }
     this.pdfDocument = await pdfjsLib.getDocument({
       data: new Uint8Array(data),
@@ -219,8 +235,14 @@ export class PDFController {
     }).promise;
     this.pageLabels = await this.pdfDocument.getPageLabels() || [];
     this.linkService.setDocument(this.pdfDocument);
+    const initialized = new Promise(resolve => {
+      const handler = () => { this.eventBus.off('pagesinit', handler); resolve(); };
+      this.eventBus.on('pagesinit', handler);
+    });
+    this.pdfViewer.spreadMode = this.spreadCount === 2 ? 1 : 0;
     this.pdfViewer.setDocument(this.pdfDocument);
-    await this.eventBus._on?.pagesloaded;
+    await initialized;
+    this.goToPage(initialPageIndex);
     this.onStatus?.(`PDF 已打开 · ${this.pdfDocument.numPages} 页`);
     return { pageCount: this.pdfDocument.numPages, outline: await this.readEmbeddedOutline() };
   }
@@ -353,7 +375,10 @@ export class PDFController {
   setOCRPages(pages = []) {
     this.pages = pages;
     this.pages.forEach(page => { if (page.pageLabel == null) page.pageLabel = this.pageLabels[page.pageIndex] || null; });
-    for (let pageIndex = 0; pageIndex < this.pageCount; pageIndex += 1) this.renderOCRTextLayer(pageIndex);
+    for (let pageIndex = 0; pageIndex < this.pageCount; pageIndex += 1) {
+      this.renderOCRTextLayer(pageIndex);
+      this.renderCharacterHighlights(pageIndex);
+    }
   }
 
   renderOCRTextLayer(pageIndex) {
@@ -707,6 +732,12 @@ export class PDFController {
 
   setMarks(marks) { this.marks = marks || []; this.renderMarks(); }
 
+  setCharacters(characters) {
+    this.characters = Array.isArray(characters) ? characters : [];
+    this.viewerElement.querySelectorAll('.pdf-character-layer').forEach(node => node.remove());
+    for (let pageIndex = 0; pageIndex < this.pageCount; pageIndex += 1) this.renderCharacterHighlights(pageIndex);
+  }
+
   renderMarks() {
     this.viewerElement.querySelectorAll('.reading-mark-layer').forEach(node => node.remove());
     for (const mark of this.marks) this.drawFragments(mark.fragments || [], `reading-mark ${mark.kind === 'annotation' ? 'annotation' : mark.color}`, mark.id);
@@ -729,18 +760,18 @@ export class PDFController {
         layer.dataset.markId = markId || className;
         pageView.div.append(layer);
       }
-      for (const fragment of pageFragments) {
+      const rectangles = pageFragments.map(fragment => {
         const first = pageView.viewport.convertToViewportPoint(fragment.rect[0], fragment.rect[1]);
         const second = pageView.viewport.convertToViewportPoint(fragment.rect[2], fragment.rect[3]);
-        const viewportRect = [first[0], first[1], second[0], second[1]];
-        const left = Math.min(viewportRect[0], viewportRect[2]);
-        const top = Math.min(viewportRect[1], viewportRect[3]);
+        return { left: Math.min(first[0], second[0]), top: Math.min(first[1], second[1]), width: Math.abs(second[0] - first[0]), height: Math.abs(second[1] - first[1]) };
+      });
+      for (const rect of highlightLineRects(rectangles)) {
         const node = document.createElement('span');
         node.className = className;
-        node.style.left = `${left}px`;
-        node.style.top = `${top}px`;
-        node.style.width = `${Math.abs(viewportRect[2] - viewportRect[0])}px`;
-        node.style.height = `${Math.abs(viewportRect[3] - viewportRect[1])}px`;
+        node.style.left = `${rect.left}px`;
+        node.style.top = `${rect.top}px`;
+        node.style.width = `${rect.width}px`;
+        node.style.height = `${rect.height}px`;
         if (markId) node.dataset.markId = markId;
         layer.append(node);
       }
@@ -748,25 +779,70 @@ export class PDFController {
   }
 
   goToPage(pageIndex) {
-    const target = Math.max(0, Math.min(this.pageCount - 1, pageIndex));
-    this.pdfViewer.currentPageNumber = target + 1;
+    const requested = Math.max(0, Math.min(this.pageCount - 1, Math.floor(Number(pageIndex) || 0)));
+    const target = this.spreadCount === 2 ? Math.floor(requested / 2) * 2 : requested;
+    if (this.locked) this.restoreLockedRegion(target);
+    else this.pdfViewer.currentPageNumber = target + 1;
     requestAnimationFrame(() => this.renderSearchHighlights(target));
   }
-  nextPage() { this.goToPage(this.currentPage + 1); }
-  previousPage() { this.goToPage(this.currentPage - 1); }
-  get currentPage() { return (this.pdfViewer.currentPageNumber || 1) - 1; }
+  nextPage() { this.goToPage(this.currentPage + this.spreadCount); }
+  previousPage() { this.goToPage(this.currentPage - this.spreadCount); }
+  get currentPage() { const page = (this.pdfViewer.currentPageNumber || 1) - 1; return this.spreadCount === 2 ? Math.floor(page / 2) * 2 : page; }
   get pageCount() { return this.pdfDocument?.numPages || 0; }
-  setScale(value) { this.pdfViewer.currentScaleValue = value; }
-  zoom(delta) { this.pdfViewer.currentScale = Math.max(0.25, Math.min(5, this.pdfViewer.currentScale + delta)); }
+  setScale(value) { if (this.locked) return; this.pdfViewer.currentScaleValue = value; }
+  zoom(delta) { if (this.locked) return; this.pdfViewer.currentScale = Math.max(0.25, Math.min(5, this.pdfViewer.currentScale + delta)); }
   rotate() {
+    if (this.locked) return;
     this.rotation = (this.rotation + 90) % 360;
     this.pdfViewer.pagesRotation = this.rotation;
     requestAnimationFrame(() => this.setOCRPages(this.pages));
   }
-  setLocked(value) { this.locked = value; if (value) this.container.scrollLeft = 0; }
+  setSpreadCount(count) {
+    if (this.locked) return;
+    const page = this.currentPage;
+    this.spreadCount = count === 2 ? 2 : 1;
+    this.pdfViewer.spreadMode = this.spreadCount === 2 ? 1 : 0;
+    this.pdfViewer.currentScaleValue = 'page-width';
+    this.goToPage(page);
+  }
+
+  setLocked(value) {
+    this.lockRestoreGeneration++;
+    this.restoringLock = false;
+    this.locked = Boolean(value);
+    this.lockedScrollLeft = this.container.scrollLeft;
+    const page = this.pdfViewer.getPageView(this.currentPage)?.div;
+    this.lockedRegion = value && page ? visiblePageRegion(page.getBoundingClientRect(), this.container.getBoundingClientRect()) : null;
+  }
+
+  async restoreLockedRegion(pageIndex) {
+    const region = this.lockedRegion;
+    if (!region || !this.pdfDocument) return;
+    const generation = ++this.lockRestoreGeneration;
+    this.restoringLock = true;
+    try {
+      const page = await this.pdfDocument.getPage(pageIndex + 1);
+      if (generation !== this.lockRestoreGeneration || !this.locked) return;
+      const base = page.getViewport({ scale: 96 / 72, rotation: (page.rotate + this.rotation) % 360 });
+      this.pdfViewer.currentScale = lockedPageScale(region, base, { width: this.container.clientWidth, height: this.container.clientHeight }, this.spreadCount);
+      this.pdfViewer.currentPageNumber = pageIndex + 1;
+      // Let PDF.js finish positioning the new page before applying the crop.
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      if (generation !== this.lockRestoreGeneration || !this.locked) return;
+      const target = this.pdfViewer.getPageView(pageIndex)?.div;
+      if (!target) return;
+      const bounds = target.getBoundingClientRect(), viewport = this.container.getBoundingClientRect();
+      this.container.scrollTop += bounds.top - viewport.top + (region.y + region.height / 2) * bounds.height - this.container.clientHeight / 2;
+      this.container.scrollLeft += bounds.left - viewport.left + region.x * bounds.width;
+      this.lockedScrollLeft = this.container.scrollLeft;
+      this.onPageChange?.(pageIndex);
+    } catch (error) { console.warn('Unable to restore locked PDF region', error); }
+    finally { if (generation === this.lockRestoreGeneration) this.restoringLock = false; }
+  }
   find(query, fragments = []) {
     this.searchQuery = String(query || '').trim();
     this.searchFragments = deduplicateFragments(fragments);
+    this.searchTarget = null;
     this.viewerElement.querySelectorAll('.original-search-layer').forEach(node => node.remove());
     for (let pageIndex = 0; pageIndex < this.pageCount; pageIndex += 1) this.renderSearchHighlights(pageIndex);
   }
@@ -774,7 +850,26 @@ export class PDFController {
   clearFind() {
     this.searchQuery = '';
     this.searchFragments = [];
+    this.searchTarget = null;
     this.viewerElement.querySelectorAll('.original-search-layer').forEach(node => node.remove());
+  }
+
+  goToTextOccurrence(pageIndex, query, occurrenceIndex = 0) {
+    this.searchQuery = String(query || '').trim();
+    this.searchFragments = [];
+    this.searchTarget = {
+      pageIndex: Math.max(0, Math.min(this.pageCount - 1, Number(pageIndex) || 0)),
+      occurrenceIndex: Math.max(0, Number(occurrenceIndex) || 0)
+    };
+    this.goToPage(this.searchTarget.pageIndex);
+    this.viewerElement.querySelectorAll('.original-search-layer').forEach(node => node.remove());
+    for (let index = 0; index < this.pageCount; index += 1) this.renderSearchHighlights(index);
+  }
+
+  markSearchTarget(mark, pageIndex, occurrenceIndex) {
+    if (this.searchTarget?.pageIndex !== pageIndex || this.searchTarget.occurrenceIndex !== occurrenceIndex) return;
+    mark.classList.add('selected');
+    requestAnimationFrame(() => mark.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' }));
   }
 
   renderSearchHighlights(pageIndex) {
@@ -800,7 +895,9 @@ export class PDFController {
     if (this.searchQuery && ocrPage) {
       const width = pageView.div.clientWidth;
       const height = pageView.div.clientHeight;
-      for (const box of ocrSearchBoxes(ocrPage.ocrLines, this.searchQuery)) {
+      const boxes = ocrSearchBoxes(ocrPage.ocrLines, this.searchQuery);
+      for (let occurrenceIndex = 0; occurrenceIndex < boxes.length; occurrenceIndex += 1) {
+        const box = boxes[occurrenceIndex];
         const [x0, y0, x1, y1] = rotateNormalizedBox(box, this.rotation);
         const mark = document.createElement('span');
         mark.className = 'original-search-highlight';
@@ -808,6 +905,7 @@ export class PDFController {
         mark.style.top = `${y0 * height}px`;
         mark.style.width = `${Math.max(1, (x1 - x0) * width)}px`;
         mark.style.height = `${Math.max(1, (y1 - y0) * height)}px`;
+        this.markSearchTarget(mark, pageIndex, occurrenceIndex);
         layer.append(mark);
       }
       if (layer.childElementCount) pageView.div.append(layer);
@@ -845,6 +943,7 @@ export class PDFController {
     }
     const pageBounds = pageView.div.getBoundingClientRect();
     let start = 0;
+    let occurrenceIndex = 0;
     while ((start = haystack.indexOf(needle, start)) >= 0) {
       const first = positions[start];
       const last = positions[start + needle.length - 1];
@@ -859,11 +958,82 @@ export class PDFController {
         mark.style.top = `${rectangle.top - pageBounds.top}px`;
         mark.style.width = `${rectangle.width}px`;
         mark.style.height = `${rectangle.height}px`;
+        this.markSearchTarget(mark, pageIndex, occurrenceIndex);
         layer.append(mark);
       }
       start += needle.length;
+      occurrenceIndex += 1;
     }
     if (layer.childElementCount) pageView.div.append(layer);
+  }
+
+  renderCharacterHighlights(pageIndex) {
+    const pageView = this.pdfViewer.getPageView(pageIndex);
+    if (!pageView?.div || !pageView.viewport) return;
+    pageView.div.querySelector('.pdf-character-layer')?.remove();
+    if (!this.characters.length) return;
+    const layer = document.createElement('div'); layer.className = 'pdf-character-layer';
+    for (const character of this.characters) {
+      let isFirst = true;
+      for (const name of character.names || []) {
+        for (const rect of this.queryClientRects(pageIndex, name)) {
+          const mark = document.createElement('span'); mark.className = 'pdf-character-highlight';
+          if (isFirst && this.isFirstCharacterPage(character, pageIndex)) mark.classList.add('first');
+          mark.style.background = character.color || 'rgba(255,180,80,.34)';
+          mark.style.left = `${rect.left}px`; mark.style.top = `${rect.top}px`;
+          mark.style.width = `${Math.max(1, rect.width)}px`; mark.style.height = `${Math.max(1, rect.height)}px`;
+          layer.append(mark); isFirst = false;
+        }
+      }
+    }
+    if (layer.childElementCount) pageView.div.append(layer);
+  }
+
+  isFirstCharacterPage(character, pageIndex) {
+    for (const page of this.pages) {
+      const text = String(page.text || '').toLocaleLowerCase('zh-CN');
+      if ((character.names || []).some(name => text.includes(String(name).toLocaleLowerCase('zh-CN')))) return page.pageIndex === pageIndex;
+    }
+    return false;
+  }
+
+  queryClientRects(pageIndex, query) {
+    const name = String(query || '').trim();
+    if (!name) return [];
+    const pageView = this.pdfViewer.getPageView(pageIndex);
+    const ocrPage = this.pages.find(page => page.pageIndex === pageIndex && page.cameFromOCR && page.ocrLines?.length);
+    if (ocrPage) {
+      const width = pageView.div.clientWidth; const height = pageView.div.clientHeight;
+      return ocrSearchBoxes(ocrPage.ocrLines, name).map(box => {
+        const [x0, y0, x1, y1] = rotateNormalizedBox(box, this.rotation);
+        return { left: x0 * width, top: y0 * height, width: (x1 - x0) * width, height: (y1 - y0) * height };
+      });
+    }
+    const textLayer = pageView.div.querySelector('.textLayer:not(.ocr-replaced-text-layer)');
+    if (!textLayer) return [];
+    const walker = document.createTreeWalker(textLayer, NodeFilter.SHOW_TEXT);
+    const projection = []; const positions = []; let node;
+    while ((node = walker.nextNode())) {
+      const value = node.nodeValue || '';
+      for (let offset = 0; offset < value.length;) {
+        const character = String.fromCodePoint(value.codePointAt(offset)); const nextOffset = offset + character.length;
+        for (const scalar of character.normalize('NFKD').toLocaleLowerCase('zh-CN')) {
+          if (!/[\p{L}\p{N}]/u.test(scalar)) continue;
+          projection.push(scalar); positions.push({ node, start: offset, end: nextOffset });
+        }
+        offset = nextOffset;
+      }
+    }
+    const needle = [...name.normalize('NFKD').toLocaleLowerCase('zh-CN')].filter(character => /[\p{L}\p{N}]/u.test(character)).join('');
+    const haystack = projection.join(''); if (!needle) return [];
+    const bounds = pageView.div.getBoundingClientRect(); const rects = []; let start = 0;
+    while ((start = haystack.indexOf(needle, start)) >= 0) {
+      const first = positions[start]; const last = positions[start + needle.length - 1]; const range = document.createRange();
+      range.setStart(first.node, first.start); range.setEnd(last.node, last.end);
+      for (const rect of range.getClientRects()) if (rect.width >= 1 && rect.height >= 1) rects.push({ left: rect.left - bounds.left, top: rect.top - bounds.top, width: rect.width, height: rect.height });
+      start += needle.length;
+    }
+    return rects;
   }
 }
 

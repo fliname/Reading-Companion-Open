@@ -4,35 +4,47 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var model: ReaderModel
+    @StateObject private var appUpdater = AppUpdateService.shared
     @State private var pageField = "1"
     @State private var showNotesHub = false
     @State private var showBookshelf = false
     @State private var showManualOutline = false
+    @State private var isDocumentDropTargeted = false
 
     var body: some View {
         VStack(spacing: 0) {
             ReaderToolbar(showNotesHub: $showNotesHub, showBookshelf: $showBookshelf)
             Divider()
-            HSplitView {
-                if model.leftSidebarVisible {
-                    SidebarView(showManualOutline: $showManualOutline)
-                        .frame(minWidth: 320, idealWidth: 410, maxWidth: 560)
-                }
-
+            ReaderColumns(
+                leftVisible: model.leftSidebarVisible,
+                rightVisible: model.assistantVisible || model.characterManagementVisible || showManualOutline,
+                locked: model.zoomLocked
+            ) {
+                SidebarView(showManualOutline: $showManualOutline)
+            } reader: {
                 readerContent
-                    .frame(minWidth: 440)
-
-                if showManualOutline {
-                    ManualOutlinePanel(onClose: { showManualOutline = false })
-                        .frame(minWidth: 400, idealWidth: 460, maxWidth: 540)
-                } else if model.assistantVisible {
-                    AssistantPanel()
-                        .frame(minWidth: 380, idealWidth: 470, maxWidth: 680)
+            } right: {
+                ZStack {
+                    if model.characterManagementVisible, model.bookCategory == .fiction {
+                        CharacterManagementPanel()
+                    } else if showManualOutline {
+                        ManualOutlinePanel(onClose: { showManualOutline = false })
+                    } else {
+                        AssistantPanel()
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             StatusBar(pageField: $pageField)
+        }
+        .background {
+            GlobalPageKeyHandler { direction in
+                guard model.document != nil, model.documentStateLoaded else { return }
+                model.changePage(by: direction)
+            }
+            .frame(width: 0, height: 0)
         }
         .alert("Reading Companion Open", isPresented: Binding(
             get: { model.errorMessage != nil },
@@ -42,6 +54,30 @@ struct ContentView: View {
         } message: {
             Text(model.errorMessage ?? "")
         }
+        .alert("发现新版本", isPresented: Binding(
+            get: { appUpdater.availableUpdate != nil },
+            set: { if !$0 { appUpdater.dismiss() } }
+        )) {
+            if let update = appUpdater.availableUpdate {
+                Button("立即升级") {
+                    model.statusMessage = "正在下载 macOS \(update.version) 安装包…"
+                    Task {
+                        do {
+                            try await appUpdater.downloadAndOpen(update)
+                            model.statusMessage = "安装包已打开，请按窗口提示完成升级"
+                        } catch {
+                            model.errorMessage = error.localizedDescription
+                        }
+                    }
+                }
+                Button("忽略此版本") { appUpdater.skip(update) }
+                Button("稍后提醒", role: .cancel) { appUpdater.dismiss() }
+            }
+        } message: {
+            if let update = appUpdater.availableUpdate {
+                Text("Reading Companion Open \(update.version) 已可用。可立即下载安装，也可以稍后再升级；阅读项目和设置不会被删除。")
+            }
+        }
         .sheet(isPresented: $showNotesHub) {
             NotesHub()
                 .environmentObject(model)
@@ -50,27 +86,136 @@ struct ContentView: View {
             BookshelfSheet()
                 .environmentObject(model)
         }
+        .sheet(isPresented: Binding(
+            get: { model.pendingImportURL != nil },
+            set: { if !$0 { model.cancelPendingImport() } }
+        )) {
+            ImportCategorySheet()
+                .environmentObject(model)
+        }
         .onChange(of: model.currentPageIndex) { _, page in pageField = "\(page + 1)" }
-        .onDrop(of: [UTType.pdf], isTargeted: nil, perform: model.acceptDroppedURLs)
+        .task { await appUpdater.checkForUpdates() }
+        .overlay {
+            if isDocumentDropTargeted {
+                RoundedRectangle(cornerRadius: 18)
+                    .fill(Color(nsColor: .windowBackgroundColor).opacity(0.92))
+                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [9, 7]))
+                    .padding(16)
+                    .overlay {
+                        Label("松开即可打开 PDF / EPUB / AZW3 / MOBI", systemImage: "doc.badge.plus")
+                            .font(.title2.weight(.semibold))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .allowsHitTesting(false)
+            }
+        }
+        .onDrop(
+            of: [
+                UTType.fileURL.identifier,
+                UTType.pdf.identifier,
+                ReaderModel.epubContentType.identifier,
+                ReaderModel.azw3ContentType.identifier,
+                ReaderModel.mobiContentType.identifier
+            ],
+            isTargeted: $isDocumentDropTargeted,
+            perform: model.acceptDroppedURLs
+        )
     }
 
     @ViewBuilder
     private var readerContent: some View {
-        if model.document != nil {
+        if model.document != nil && !model.documentStateLoaded {
+            ProgressView("正在恢复阅读位置…").frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if model.reflowBook != nil {
+            ReflowReaderView(
+                model: model,
+                showsTwoPages: usesTwoReflowPages
+            )
+                .background(Color(nsColor: .underPageBackgroundColor))
+        } else if model.document != nil {
             PDFReaderView(model: model)
                 .background(Color(nsColor: .underPageBackgroundColor))
         } else {
             ContentUnavailableView {
-                Label("打开 PDF 开始伴读", systemImage: "doc.richtext")
+                Label("打开一本书开始伴读", systemImage: "doc.richtext")
             } description: {
-                Text("拖放 PDF 到这里，或点击下方按钮。\n文本页会直接索引，扫描页将在本机进行 OCR。")
+                Text("拖放 PDF、EPUB、AZW3 或 MOBI 到这里，或点击下方按钮。\n电子书正文会随字号与阅读区宽度自动重排；PDF 扫描页将在本机进行 OCR。")
             } actions: {
-                Button("选择 PDF…") { model.presentOpenPanel() }
+                Button("选择文档…") { model.presentOpenPanel() }
                     .buttonStyle(.borderedProminent)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(nsColor: .underPageBackgroundColor))
         }
+    }
+
+    private var usesTwoReflowPages: Bool {
+        switch model.reflowPageMode {
+        case .automatic:
+            !model.leftSidebarVisible && !model.assistantVisible && !showManualOutline
+        case .single:
+            false
+        case .double:
+            true
+        }
+    }
+}
+
+private struct GlobalPageKeyHandler: NSViewRepresentable {
+    let onTurn: (Int) -> Void
+
+    func makeNSView(context: Context) -> PageKeyCaptureView {
+        PageKeyCaptureView(onTurn: onTurn)
+    }
+
+    func updateNSView(_ view: PageKeyCaptureView, context: Context) {
+        view.onTurn = onTurn
+    }
+
+    static func dismantleNSView(_ view: PageKeyCaptureView, coordinator: Void) {
+        view.detach()
+    }
+}
+
+private final class PageKeyCaptureView: NSView {
+    var onTurn: (Int) -> Void
+    private var monitor: Any?
+
+    init(onTurn: @escaping (Int) -> Void) {
+        self.onTurn = onTurn
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        detach()
+        guard window != nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.window === self.window,
+                  event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+                  !Self.isEditingText(in: event.window) else { return event }
+            let direction: Int
+            switch event.keyCode {
+            case 123, 126: direction = -1
+            case 124, 125: direction = 1
+            default: return event
+            }
+            self.onTurn(direction)
+            return nil
+        }
+    }
+
+    func detach() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+    }
+
+    private static func isEditingText(in window: NSWindow?) -> Bool {
+        guard let editor = window?.firstResponder as? NSTextView else { return false }
+        return editor.isEditable
     }
 }
 
@@ -84,6 +229,7 @@ private struct ReaderToolbar: View {
             Button { model.leftSidebarVisible.toggle() } label: {
                 Image(systemName: "sidebar.left")
             }
+            .disabled(model.zoomLocked)
             .help("显示或隐藏导航栏")
 
             Button { model.presentOpenPanel() } label: {
@@ -101,14 +247,48 @@ private struct ReaderToolbar: View {
             Divider().frame(height: 20)
 
             Menu {
-                Button("整页显示") { setFit(.page) }
-                Button("适合宽度") { setFit(.width) }
-                Button("自定义缩放") { setFit(.custom) }
+                if model.reflowBook != nil {
+                    Button("默认字号") { setReflowScale(1.0) }
+                    Button("较小字号") { setReflowScale(0.85) }
+                    Button("较大字号") { setReflowScale(1.2) }
+                } else {
+                    Button("整页显示") { setFit(.page) }
+                    Button("适合宽度") { setFit(.width) }
+                    Button("自定义缩放") { setFit(.custom) }
+                }
             } label: {
                 Label(fitLabel, systemImage: "rectangle.arrowtriangle.2.inward")
             }
             .menuStyle(.borderlessButton)
-            .help("调整页面在阅读区中的大小；选择时会解除锁定")
+            .help("调整页面在阅读区中的大小")
+            .disabled(model.zoomLocked)
+
+            if model.reflowBook != nil {
+                Menu {
+                    ForEach(ReflowPageMode.allCases) { mode in
+                        Button {
+                            model.reflowPageMode = mode
+                        } label: {
+                            if mode == model.reflowPageMode {
+                                Label(mode.rawValue, systemImage: "checkmark")
+                            } else {
+                                Text(mode.rawValue)
+                            }
+                        }
+                    }
+                } label: {
+                    Label(model.reflowPageMode.rawValue, systemImage: model.reflowPageMode == .double ? "rectangle.split.2x1" : "rectangle")
+                }
+                .menuStyle(.borderlessButton)
+                .help(model.reflowPageMode.detail)
+                .disabled(model.zoomLocked)
+            } else if model.document != nil {
+                Button { model.pdfTwoPages.toggle() } label: {
+                    Label(model.pdfTwoPages ? "双页" : "单页", systemImage: model.pdfTwoPages ? "rectangle.split.2x1" : "rectangle")
+                }
+                .help("切换 PDF 单页 / 双页阅读")
+                .disabled(model.zoomLocked)
+            }
 
             Button { adjustZoom(by: -0.1) } label: { Image(systemName: "minus.magnifyingglass") }
                 .disabled(model.zoomLocked)
@@ -119,12 +299,12 @@ private struct ReaderToolbar: View {
                 .disabled(model.zoomLocked)
             Button { model.rotateCurrentPage() } label: { Image(systemName: "rotate.right") }
                 .help("顺时针旋转当前页")
-                .disabled(model.document == nil)
+                .disabled(model.document == nil || model.reflowBook != nil || model.zoomLocked)
             Toggle(isOn: $model.zoomLocked) {
                 Image(systemName: model.zoomLocked ? "lock.fill" : "lock.open")
             }
             .toggleStyle(.button)
-            .help("锁定横向位置与缩放，只允许上下滚动")
+            .help("锁定阅读区和左右栏宽度；PDF 翻页沿用当前可见范围")
 
             Divider().frame(height: 20)
             Button { model.undoHighlightChange() } label: { Image(systemName: "arrow.uturn.backward") }
@@ -171,6 +351,7 @@ private struct ReaderToolbar: View {
                 Image(systemName: "sidebar.right")
             }
             .help("显示或隐藏 AI 伴读")
+            .disabled(model.zoomLocked)
         }
         .buttonStyle(.borderless)
         .imageScale(.medium)
@@ -180,7 +361,15 @@ private struct ReaderToolbar: View {
 
     private func adjustZoom(by delta: Double) {
         model.fitMode = .custom
-        model.zoomScale = min(max(model.zoomScale + delta, 0.2), 6)
+        let lowerBound = model.reflowBook == nil ? 0.2 : 0.65
+        let upperBound = model.reflowBook == nil ? 6.0 : 2.25
+        model.zoomScale = min(max(model.zoomScale + delta, lowerBound), upperBound)
+    }
+
+    private func setReflowScale(_ scale: Double) {
+        model.zoomLocked = false
+        model.fitMode = .custom
+        model.zoomScale = scale
     }
 
     private func setFit(_ fit: ReaderFitMode) {
@@ -189,7 +378,8 @@ private struct ReaderToolbar: View {
     }
 
     private var fitLabel: String {
-        switch model.fitMode {
+        if model.reflowBook != nil { return "字号" }
+        return switch model.fitMode {
         case .page: "整页"
         case .width: "适宽"
         case .custom: "缩放"
@@ -333,11 +523,12 @@ private struct SidebarView: View {
     @State private var showsOutlineSummaries = false
     @State private var expandedSummaryIDs: Set<UUID> = []
     @State private var showsOutlineTools = false
+    @State private var pendingSummaryDeletionID: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
             Picker("导航", selection: $model.selectedSidebar) {
-                ForEach(SidebarSection.allCases) { section in
+                ForEach(availableSidebarSections) { section in
                     Image(systemName: section.symbol).tag(section)
                 }
             }
@@ -351,13 +542,36 @@ private struct SidebarView: View {
             case .thumbnails: thumbnailList
             case .bookmarks: bookmarkList
             case .highlights: highlightList
+            case .characters: characterList
             case .search: searchList
             }
         }
         .background(.regularMaterial)
         .onChange(of: model.documentURL) { _, _ in
             showsOutlineTools = false
+            showsOutlineSummaries = false
+            expandedSummaryIDs.removeAll()
+            model.summaryStartPage = ""
+            model.summaryEndPage = ""
         }
+        .onChange(of: model.aiCompanionMode) { _, _ in
+            expandedSummaryIDs.removeAll()
+        }
+        .onChange(of: model.bookCategory) { _, category in
+            showsOutlineSummaries = false
+            expandedSummaryIDs.removeAll()
+            if category != .fiction, model.selectedSidebar == .characters {
+                model.selectedSidebar = .outline
+            }
+            if category != .fiction { model.characterManagementVisible = false }
+        }
+        .onChange(of: model.selectedSidebar) { _, section in
+            if section != .characters { model.characterManagementVisible = false }
+        }
+    }
+
+    private var availableSidebarSections: [SidebarSection] {
+        SidebarSection.allCases.filter { $0 != .characters || model.bookCategory == .fiction }
     }
 
     private var thumbnailList: some View {
@@ -387,6 +601,44 @@ private struct SidebarView: View {
     }
 
     private var outlineList: some View {
+        Group {
+            if model.bookCategory == .fiction {
+                ZStack {
+                    outlineContents
+                        .opacity(showsOutlineSummaries ? 0 : 1)
+                        .allowsHitTesting(!showsOutlineSummaries)
+                        .accessibilityHidden(showsOutlineSummaries)
+                    fictionPageRangeSummaryPanel
+                        .opacity(showsOutlineSummaries ? 1 : 0)
+                        .allowsHitTesting(showsOutlineSummaries)
+                        .accessibilityHidden(!showsOutlineSummaries)
+                }
+                .clipped()
+            } else {
+                outlineContents
+            }
+        }
+        .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var emptyPageRangeSummaryView: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 30))
+                .foregroundStyle(.secondary)
+            Text("还没有概要")
+                .font(.headline)
+            Text("输入页码范围后生成；每次结果都会保留在这里。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(20)
+        .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var outlineContents: some View {
         VStack(spacing: 0) {
             HStack {
                 Button {
@@ -403,14 +655,20 @@ private struct SidebarView: View {
                 .help(showsOutlineTools ? "收起目录建立工具" : "显示目录建立工具")
                 Spacer()
                 Button {
-                    showsOutlineSummaries.toggle()
-                    if !showsOutlineSummaries { expandedSummaryIDs.removeAll() }
+                    if model.bookCategory == .fiction {
+                        showFictionSummaryPanel()
+                    } else {
+                        showsOutlineSummaries.toggle()
+                        if !showsOutlineSummaries { expandedSummaryIDs.removeAll() }
+                    }
                 } label: {
                     Label("概要", systemImage: "list.bullet.rectangle")
                         .foregroundStyle(showsOutlineSummaries ? Color.accentColor : Color.primary)
                 }
                 .buttonStyle(.borderless)
-                .help(showsOutlineSummaries ? "隐藏章节概要" : "显示章节概要的展开按钮")
+                .help(model.bookCategory == .fiction
+                      ? "按页码范围生成概要"
+                      : (showsOutlineSummaries ? "隐藏章节概要" : "显示章节概要的展开按钮"))
             }
             .padding(.horizontal, 10)
             .padding(.top, 10)
@@ -418,11 +676,12 @@ private struct SidebarView: View {
             if showsOutlineTools {
                 HStack(spacing: 7) {
                     Button("自动识别") { model.relocateTOC() }
-                        .help("优先使用 PDF 自带目录；没有时自动定位印刷目录页")
-                    Button("手动添加") { showManualOutline = true }
+                        .help("优先使用文档自带目录；没有时自动定位正文中的目录页")
+                    Button("手动添加") { model.assistantVisible = true; showManualOutline = true }
+                        .disabled(model.zoomLocked && !model.assistantVisible)
                         .help("每行粘贴一条目录，自动提取标题、页码和层级")
                     Button("恢复自带目录") { model.restoreEmbeddedOutline() }
-                        .help(model.hasEmbeddedOutline ? "恢复 PDF 自带目录" : "PDF 无自带目录")
+                        .help(model.hasEmbeddedOutline ? "恢复文档自带目录" : "文档无自带目录")
                         .disabled(!model.hasEmbeddedOutline)
                     Spacer(minLength: 0)
                 }
@@ -454,11 +713,11 @@ private struct SidebarView: View {
                                 .buttonStyle(.plain)
                                 .help(expandedSummaryIDs.contains(entry.id) ? "收起概要" : "展开概要")
                             }
-                            Button { model.go(to: entry.pageIndex) } label: {
+                            Button { model.goToOutline(entry) } label: {
                                 HStack(spacing: 4) {
                                     Text(entry.title).font(.system(size: 14)).lineLimit(2)
                                     Spacer()
-                                    Text("\(entry.pageIndex + 1)")
+                                    Text("\(model.outlineDisplayPages[entry.id] ?? (entry.pageIndex + 1))")
                                         .font(.system(size: 12))
                                         .foregroundStyle(.secondary)
                                         .monospacedDigit()
@@ -475,14 +734,14 @@ private struct SidebarView: View {
                                 .padding(.bottom, 5)
                         }
                     }
-                    .help(model.outlineWasManuallyEdited ? "手动目录" : (model.outlineRefinedByAI ? "AI 从印刷目录页识别并校准页码" : "PDF 自带目录"))
+                    .help(model.outlineWasManuallyEdited ? "手动目录" : (model.outlineRefinedByAI ? "AI 从目录页识别并校准页码" : "文档自带目录"))
                     .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
                 }
             }
             .overlay {
                 if model.document != nil && model.outline.isEmpty {
                     ContentUnavailableView(
-                        model.hasEmbeddedOutline ? "尚无目录" : "PDF 无自带目录",
+                        model.hasEmbeddedOutline ? "尚无目录" : "文档无自带目录",
                         systemImage: "list.bullet.indent"
                     )
                 }
@@ -513,6 +772,149 @@ private struct SidebarView: View {
         }
     }
 
+    private var fictionPageRangeSummaryPanel: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button {
+                    showsOutlineSummaries = false
+                } label: {
+                    Label("目录", systemImage: "chevron.left")
+                }
+                .buttonStyle(.borderless)
+                Spacer()
+                Label("概要", systemImage: "list.bullet.rectangle")
+                    .font(.headline)
+            }
+            .padding(10)
+            Divider()
+
+            VStack(alignment: .leading, spacing: 9) {
+                Text("按页码范围生成")
+                    .font(.subheadline.weight(.semibold))
+                HStack(spacing: 7) {
+                    TextField("起始页", text: summaryPageBinding(start: true))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 78)
+                    Text("—").foregroundStyle(.secondary)
+                    TextField("结束页", text: summaryPageBinding(start: false))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 78)
+                    Spacer(minLength: 0)
+                    Button {
+                        generateFictionPageRangeSummary()
+                    } label: {
+                        if model.isGeneratingPageRangeSummary {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text("生成")
+                        }
+                    }
+                    .disabled(validSummaryPageRange == nil || model.isGeneratingPageRangeSummary || model.indexingProgress < 1)
+                }
+                Text("请输入阅读器页码，范围 1–\(max(model.pageRangeSummaryPageCount, 1))。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(10)
+            Divider()
+
+            if model.pageRangeSummaries.isEmpty {
+                emptyPageRangeSummaryView
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(model.pageRangeSummaries) { record in
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(spacing: 8) {
+                                    Button { model.goToPageRangeSummary(record) } label: {
+                                        Label(record.pageLabel, systemImage: "book.pages")
+                                            .font(.subheadline.weight(.semibold))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("跳转到概要对应的原文")
+                                    Spacer(minLength: 0)
+                                    Button(role: .destructive) {
+                                        pendingSummaryDeletionID = record.id
+                                    } label: {
+                                        Image(systemName: "trash")
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .help("删除这条概要")
+                                    .accessibilityLabel("删除\(record.pageLabel)概要")
+                                }
+                                Divider()
+                                Text(record.summary)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { model.goToPageRangeSummary(record) }
+                            }
+                            .padding(11)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.secondary.opacity(0.16)))
+                        }
+                    }
+                    .padding(10)
+                }
+            }
+        }
+        .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+        .background(.regularMaterial)
+        .clipped()
+        .confirmationDialog(
+            "删除这条概要？",
+            isPresented: Binding(
+                get: { pendingSummaryDeletionID != nil },
+                set: { if !$0 { pendingSummaryDeletionID = nil } }
+            )
+        ) {
+            Button("删除概要", role: .destructive) {
+                guard let id = pendingSummaryDeletionID else { return }
+                model.deletePageRangeSummary(id: id)
+                pendingSummaryDeletionID = nil
+            }
+            Button("取消", role: .cancel) {
+                pendingSummaryDeletionID = nil
+            }
+        } message: {
+            Text("删除后将从当前书籍的阅读记录中移除。")
+        }
+    }
+
+    private func summaryPageBinding(start: Bool) -> Binding<String> {
+        Binding(get: { start ? model.summaryStartPage : model.summaryEndPage }, set: { value in
+            model.summaryDraftAnchors = nil
+            if start { model.summaryStartPage = value } else { model.summaryEndPage = value }
+        })
+    }
+
+    private var validSummaryPageRange: ClosedRange<Int>? {
+        guard let start = Int(model.summaryStartPage.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let end = Int(model.summaryEndPage.trimmingCharacters(in: .whitespacesAndNewlines)),
+              start >= 1,
+              end >= start,
+              end <= model.pageRangeSummaryPageCount else { return nil }
+        return start...end
+    }
+
+    private func showFictionSummaryPanel() {
+        showsOutlineTools = false
+        showsOutlineSummaries = true
+        if model.summaryStartPage.isEmpty || model.summaryEndPage.isEmpty {
+            let current = model.reflowBook == nil ? model.currentPageIndex + 1 : model.reflowPageNumber
+            let bounded = min(max(current, 1), max(model.pageRangeSummaryPageCount, 1))
+            model.summaryStartPage = String(bounded)
+            model.summaryEndPage = String(bounded)
+        }
+    }
+
+    private func generateFictionPageRangeSummary() {
+        guard let range = validSummaryPageRange else { return }
+        model.generatePageRangeSummary(startPage: range.lowerBound, endPage: range.upperBound)
+    }
+
     @ViewBuilder
     private func chapterSummaryView(for entry: OutlineEntry) -> some View {
         if model.isGeneratingChapterSummary(for: entry) {
@@ -524,7 +926,17 @@ private struct SidebarView: View {
             }
             .padding(.vertical, 8)
         } else if let summary = model.chapterSummary(for: entry) {
-            ChapterSummaryCards(summary: summary)
+            Group {
+                if model.aiCompanionMode == .free {
+                    Text(summary)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.vertical, 6)
+                } else {
+                    ChapterSummaryCards(summary: summary)
+                }
+            }
                 .contextMenu {
                     Button("重新生成") { model.generateChapterSummary(for: entry, refresh: true) }
                 }
@@ -732,6 +1144,11 @@ private struct SidebarView: View {
         }
     }
 
+    private var characterList: some View {
+        CharacterSidebarContent()
+            .environmentObject(model)
+    }
+
     private var searchList: some View {
         VStack(spacing: 0) {
             HStack {
@@ -744,7 +1161,7 @@ private struct SidebarView: View {
             .padding(10)
             Divider()
             List(model.searchResults) { result in
-                Button { model.go(to: result.pageIndex) } label: {
+                Button { model.go(toSearchResult: result) } label: {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(highlightedSearchResult(result.text))
                             .lineLimit(4)
@@ -780,7 +1197,7 @@ private struct AssistantPanel: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 9) {
-                Text("AI 伴读")
+                Text("AI 伴读 · \(model.bookCategory?.rawValue ?? "未分类")")
                     .font(.title3.bold())
                     .fixedSize()
                 Spacer(minLength: 4)
@@ -792,7 +1209,7 @@ private struct AssistantPanel: View {
             .padding(.top, 10)
             HStack(spacing: 9) {
                 modelMenu
-                depthMenu
+                if model.aiCompanionMode == .academic { depthMenu }
                 usageButton
                 Spacer(minLength: 4)
                 Text(model.indexingStatus)
@@ -803,7 +1220,7 @@ private struct AssistantPanel: View {
             .padding(.horizontal, 12)
             .padding(.top, 4)
             .padding(.bottom, 9)
-            if model.document != nil && model.indexingProgress < 1 {
+            if model.isImportingDocument || (model.document != nil && model.indexingProgress < 1) {
                 ProgressView(value: model.indexingProgress)
                     .progressViewStyle(.linear)
                     .padding(.horizontal, 12)
@@ -1082,9 +1499,20 @@ private struct APIAssistantPanel: View {
             VStack(spacing: 10) {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        QuickQuestion("解释一下", action: "解释")
-                        QuickQuestion("联系上下文", action: "上下文")
-                        QuickQuestion("链接资源", action: "资源", systemImage: "globe")
+                        if model.aiCompanionMode == .academic {
+                            QuickQuestion("解释一下", action: "解释")
+                            QuickQuestion("联系上下文", action: "上下文")
+                            QuickQuestion("链接资源", action: "资源", systemImage: "globe")
+                            Toggle(isOn: $model.assistantUsesLJGReadSkill) {
+                                Text("ljg-read")
+                            }
+                            .toggleStyle(.button)
+                            .controlSize(.small)
+                            .help(model.assistantUsesLJGReadSkill
+                                  ? "已开启 ljg-read 伴读 Skill"
+                                  : "已关闭 ljg-read；下一轮使用基础原文问答")
+                            .onChange(of: model.assistantUsesLJGReadSkill) { _, _ in model.persist() }
+                        }
                         Toggle(isOn: $model.assistantUsesWholeBook) {
                             Label("联系全书", systemImage: "books.vertical")
                         }
@@ -1512,81 +1940,312 @@ private struct BookshelfSheet: View {
     @EnvironmentObject private var model: ReaderModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openWindow) private var openWindow
-    @State private var projectPendingDeletion: CachedProject?
+    @State private var pendingDeletionIDs: Set<String> = []
+    @State private var selectedProjectIDs: Set<String> = []
+    @State private var isSelecting = false
+    @State private var selectedFilter: BookshelfFilter = .all
+    @State private var showsNewFolder = false
+    @State private var newFolderName = ""
+    @State private var pendingFolderDeletion: BookshelfFolder?
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Label("书架", systemImage: "books.vertical").font(.title2.bold())
+                Button {
+                    newFolderName = ""
+                    showsNewFolder = true
+                } label: {
+                    Label("新建文件夹", systemImage: "folder.badge.plus")
+                }
+                Button(isSelecting ? "取消" : "批量管理") {
+                    isSelecting.toggle()
+                    if !isSelecting { selectedProjectIDs.removeAll() }
+                }
+                if isSelecting {
+                    Button(selectedProjectIDs.isSuperset(of: Set(filteredProjects.map(\.id))) ? "取消全选" : "全选") {
+                        let visibleIDs = Set(filteredProjects.map(\.id))
+                        if selectedProjectIDs.isSuperset(of: visibleIDs) {
+                            selectedProjectIDs.subtract(visibleIDs)
+                        } else {
+                            selectedProjectIDs.formUnion(visibleIDs)
+                        }
+                    }
+                    .disabled(filteredProjects.isEmpty)
+                    Menu {
+                        ForEach(model.bookshelfFolders) { folder in
+                            Button {
+                                organizeSelected(into: folder)
+                            } label: {
+                                Label(folder.title, systemImage: "folder.badge.plus")
+                            }
+                        }
+                    } label: {
+                        Label("整理到文件夹", systemImage: "folder")
+                    }
+                    .disabled(selectedProjectIDs.isEmpty || model.bookshelfFolders.isEmpty)
+                    Menu {
+                        Button {
+                            categorizeSelected(as: .nonfiction)
+                        } label: {
+                            Label("非虚构类", systemImage: "text.book.closed")
+                        }
+                        Button {
+                            categorizeSelected(as: .fiction)
+                        } label: {
+                            Label("虚构类", systemImage: "theatermasks")
+                        }
+                    } label: {
+                        Label("修改分类", systemImage: "tag")
+                    }
+                    .disabled(selectedProjectIDs.isEmpty)
+                    Button(role: .destructive) {
+                        pendingDeletionIDs = selectedProjectIDs
+                    } label: {
+                        Label("删除", systemImage: "trash")
+                    }
+                    .disabled(selectedProjectIDs.isEmpty)
+                }
                 Spacer()
+                Text("\(filteredProjects.count) 本")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
                 Button("完成") { dismiss() }
             }
             .padding(16)
             Divider()
-            if model.cachedProjects.isEmpty {
-                ContentUnavailableView(
-                    "书架还是空的",
-                    systemImage: "books.vertical",
-                    description: Text("打开 PDF 后，阅读位置、目录、划线和对话会自动成为缓存项目。")
-                )
-            } else {
-                List(model.cachedProjects) { project in
-                    HStack(spacing: 12) {
-                        Image(systemName: project.isAvailable ? "doc.richtext" : "questionmark.folder")
-                            .font(.title2)
-                            .foregroundStyle(project.isAvailable ? Color.accentColor : Color.secondary)
-                            .frame(width: 30)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(project.title).font(.headline).lineLimit(1)
-                            Text(project.sourcePath)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                            Text(project.lastOpenedAt, style: .relative)
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-                        Spacer()
-                        if model.documentURL?.standardizedFileURL.path == project.sourcePath {
-                            Text("当前项目")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Button(role: .destructive) {
-                            projectPendingDeletion = project
-                        } label: {
-                            Label("删除", systemImage: "trash")
-                        }
-                        .buttonStyle(.bordered)
-                        .help("删除该 PDF 的阅读记录、目录、概要、OCR 与索引缓存")
-                        Button(openButtonTitle(for: project)) { open(project) }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!project.isAvailable || openDestination(for: project) == .alreadyOpen)
-                        .help(openButtonHelp(for: project))
+            HSplitView {
+                List(selection: $selectedFilter) {
+                    Label("全部书籍", systemImage: "books.vertical").tag(BookshelfFilter.all)
+                    Section("书籍类型") {
+                        Label("非虚构类", systemImage: "text.book.closed")
+                            .tag(BookshelfFilter.category(.nonfiction))
+                        Label("虚构类", systemImage: "theatermasks")
+                            .tag(BookshelfFilter.category(.fiction))
                     }
-                    .padding(.vertical, 5)
+                    Section("文件夹") {
+                        ForEach(model.bookshelfFolders) { folder in
+                            HStack {
+                                Label(folder.title, systemImage: "folder")
+                                Spacer()
+                                if isSelecting {
+                                    Button(role: .destructive) {
+                                        pendingFolderDeletion = folder
+                                    } label: {
+                                        Image(systemName: "trash")
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .help("删除文件夹，书籍仍保留在书架")
+                                    .accessibilityLabel("删除文件夹“\(folder.title)”")
+                                }
+                            }
+                                .tag(BookshelfFilter.folder(folder.id))
+                        }
+                    }
                 }
+                .frame(minWidth: 175, idealWidth: 190, maxWidth: 230)
+
+                Group {
+                    if model.cachedProjects.isEmpty {
+                        ContentUnavailableView(
+                            "书架还是空的",
+                            systemImage: "books.vertical",
+                            description: Text("打开 PDF、EPUB、AZW3 或 MOBI 后，书籍会以封面形式保存在这里。")
+                        )
+                    } else if filteredProjects.isEmpty {
+                        ContentUnavailableView("这个文件夹是空的", systemImage: "folder")
+                    } else {
+                        ScrollView {
+                            LazyVGrid(
+                                columns: Array(repeating: GridItem(.fixed(150), spacing: 22), count: 4),
+                                alignment: .leading,
+                                spacing: 24
+                            ) {
+                                ForEach(filteredProjects) { project in
+                                    projectCard(project)
+                                }
+                            }
+                            .padding(22)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                        }
+                    }
+                }
+                .frame(minWidth: 700, maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(1)
             }
         }
-        .frame(width: 650, height: 430)
+        .frame(width: 980, height: 650)
         .onAppear { model.refreshCachedProjects() }
-        .confirmationDialog(
-            "删除“\(projectPendingDeletion?.title ?? "")”的全部缓存？",
+        .alert("新建文件夹", isPresented: $showsNewFolder) {
+            TextField("文件夹名称", text: $newFolderName)
+            Button("取消", role: .cancel) {}
+            Button("建立") { model.createBookshelfFolder(named: newFolderName) }
+        } message: {
+            Text("文件夹只整理书架，不会移动原始书籍文件。")
+        }
+        .alert(
+            pendingFolderDeletion.map { "删除文件夹“\($0.title)”？" } ?? "删除文件夹？",
             isPresented: Binding(
-                get: { projectPendingDeletion != nil },
-                set: { if !$0 { projectPendingDeletion = nil } }
+                get: { pendingFolderDeletion != nil },
+                set: { if !$0 { pendingFolderDeletion = nil } }
+            )
+        ) {
+            Button("取消", role: .cancel) { pendingFolderDeletion = nil }
+            Button("删除文件夹", role: .destructive) {
+                guard let folder = pendingFolderDeletion else { return }
+                model.deleteBookshelfFolder(folder)
+                if selectedFilter == .folder(folder.id) { selectedFilter = .all }
+                pendingFolderDeletion = nil
+            }
+        } message: {
+            Text("只删除文件夹；其中的书仍保留在书架中。")
+        }
+        .confirmationDialog(
+            pendingDeletionIDs.count > 1
+                ? "删除所选的 \(pendingDeletionIDs.count) 本书及其全部缓存？"
+                : "删除这本书及其全部缓存？",
+            isPresented: Binding(
+                get: { !pendingDeletionIDs.isEmpty },
+                set: { if !$0 { pendingDeletionIDs.removeAll() } }
             ),
             titleVisibility: .visible
         ) {
             Button("删除缓存", role: .destructive) {
-                guard let project = projectPendingDeletion else { return }
-                model.deleteCachedProject(project)
-                projectPendingDeletion = nil
+                model.deleteCachedProjects(model.cachedProjects.filter { pendingDeletionIDs.contains($0.id) })
+                selectedProjectIDs.subtract(pendingDeletionIDs)
+                pendingDeletionIDs.removeAll()
             }
-            Button("取消", role: .cancel) { projectPendingDeletion = nil }
+            Button("取消", role: .cancel) { pendingDeletionIDs.removeAll() }
         } message: {
-            Text("阅读进度、目录、概要、划线、批注、AI 对话及 OCR/索引缓存都会被清除。原始 PDF 和 Obsidian 笔记不会被删除；再次打开 PDF 时会作为全新项目重新处理。")
+            Text("阅读进度、目录、概要、划线、批注、AI 对话及排版/OCR/索引缓存都会被清除。原始文档和 Obsidian 笔记不会被删除；再次打开时会作为全新项目重新处理。")
         }
+    }
+
+    private var filteredProjects: [CachedProject] {
+        switch selectedFilter {
+        case .all: model.cachedProjects
+        case .category(let category): model.cachedProjects.filter { $0.category == category }
+        case .folder(let id): model.cachedProjects.filter { $0.assignedFolderIDs.contains(id) }
+        }
+    }
+
+    private var selectedProjects: [CachedProject] {
+        model.cachedProjects.filter { selectedProjectIDs.contains($0.id) }
+    }
+
+    private func projectCard(_ project: CachedProject) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                if isSelecting { toggleSelection(project) } else { open(project) }
+            } label: {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                    if let image = coverImage(for: project) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        VStack(spacing: 10) {
+                            Image(systemName: project.isAvailable ? "book.closed.fill" : "questionmark.folder")
+                                .font(.system(size: 36))
+                            Text(project.title)
+                                .font(.caption.bold())
+                                .multilineTextAlignment(.center)
+                                .lineLimit(4)
+                                .padding(.horizontal, 10)
+                        }
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(width: 135, height: 190)
+                .clipped()
+                .shadow(color: .black.opacity(0.18), radius: 4, y: 3)
+                .overlay(alignment: .topTrailing) {
+                    if isSelecting {
+                        Image(systemName: selectedProjectIDs.contains(project.id) ? "checkmark.circle.fill" : "circle")
+                            .font(.title2)
+                            .foregroundStyle(selectedProjectIDs.contains(project.id) ? Color.accentColor : Color.white)
+                            .shadow(radius: 2)
+                            .padding(7)
+                    } else if model.documentURL?.standardizedFileURL.path == project.sourcePath {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.white, Color.accentColor)
+                            .padding(7)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(!isSelecting && (!project.isAvailable || openDestination(for: project) == .alreadyOpen))
+
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(project.category.map { Color(nsColor: $0.markerColor) } ?? Color.gray)
+                    .frame(width: 8, height: 8)
+                Text(project.title).font(.headline).lineLimit(2)
+            }
+            Text(project.category?.rawValue ?? "未分类")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(width: 140, alignment: .leading)
+        .contextMenu {
+            Button(openButtonTitle(for: project)) { open(project) }
+                .disabled(!project.isAvailable || openDestination(for: project) == .alreadyOpen)
+            Menu("所在文件夹") {
+                ForEach(model.bookshelfFolders) { folder in
+                    let included = project.assignedFolderIDs.contains(folder.id)
+                    Button {
+                        model.setCachedProjects(
+                            [project],
+                            in: folder.id,
+                            included: !included,
+                            folderTitle: folder.title
+                        )
+                    } label: {
+                        Label(folder.title, systemImage: included ? "checkmark.circle.fill" : "folder.badge.plus")
+                    }
+                }
+            }
+            Divider()
+            Button("删除缓存", role: .destructive) { pendingDeletionIDs = [project.id] }
+        }
+        .help(project.sourcePath)
+    }
+
+    private func toggleSelection(_ project: CachedProject) {
+        if selectedProjectIDs.contains(project.id) { selectedProjectIDs.remove(project.id) }
+        else { selectedProjectIDs.insert(project.id) }
+    }
+
+    private func organizeSelected(into folder: BookshelfFolder) {
+        let projects = selectedProjects
+        guard !projects.isEmpty else { return }
+        model.setCachedProjects(
+            projects,
+            in: folder.id,
+            included: true,
+            folderTitle: folder.title
+        )
+        selectedFilter = .folder(folder.id)
+        selectedProjectIDs.removeAll()
+        isSelecting = false
+    }
+
+    private func categorizeSelected(as category: BookCategory) {
+        let projects = selectedProjects
+        guard !projects.isEmpty else { return }
+        model.setCachedProjects(projects, category: category)
+        selectedFilter = .category(category)
+        selectedProjectIDs.removeAll()
+        isSelecting = false
+    }
+
+    private func coverImage(for project: CachedProject) -> NSImage? {
+        guard let path = project.coverPath,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              !data.isEmpty else { return nil }
+        return NSImage(data: data)
     }
 
     private func openDestination(for project: CachedProject) -> BookshelfOpenDestination {
@@ -1610,9 +2269,14 @@ private struct BookshelfSheet: View {
     }
 
     private func open(_ project: CachedProject) {
+        if project.category == nil {
+            model.beginImport(project.sourceURL)
+            dismiss()
+            return
+        }
         switch openDestination(for: project) {
         case .currentWindow:
-            model.open(project.sourceURL)
+            model.open(project.sourceURL, category: project.category ?? .nonfiction)
             dismiss()
         case .newWindow:
             openWindow(value: project.sourcePath)
@@ -1621,6 +2285,12 @@ private struct BookshelfSheet: View {
             dismiss()
         }
     }
+}
+
+private enum BookshelfFilter: Hashable {
+    case all
+    case category(BookCategory)
+    case folder(UUID)
 }
 
 private struct NotesHub: View {
@@ -1893,7 +2563,6 @@ private struct ManualOutlinePanel: View {
     @State private var parseStatus = ""
     @State private var selectedDraftIDs: Set<UUID> = []
     @State private var batchLevel = 0
-    @State private var batchPageShift = 0
     @State private var showBatchDeleteConfirmation = false
 
     var body: some View {
@@ -1932,7 +2601,7 @@ private struct ManualOutlinePanel: View {
             Divider()
             HStack {
                 Text("目录条目").font(.headline)
-                Text("识别后仍可改标题、PDF 页和层级，也可上下移动").font(.caption).foregroundStyle(.secondary)
+                Text("识别后仍可改标题、文档页和层级，也可上下移动").font(.caption).foregroundStyle(.secondary)
                 Spacer()
             }
             HStack(spacing: 9) {
@@ -1948,33 +2617,29 @@ private struct ManualOutlinePanel: View {
                 Spacer()
                 Picker("批量层级", selection: $batchLevel) {
                     ForEach(0..<6, id: \.self) { level in
-                        Text("第 \(level + 1) 级").tag(level)
+                        Text("\(level + 1)").tag(level)
                     }
                 }
-                .frame(width: 120)
-                Button("应用层级") { applyBatchLevel() }
-                    .disabled(selectedDraftIDs.isEmpty)
-                TextField("页差", value: $batchPageShift, format: .number)
-                    .frame(width: 54)
-                    .help("正数向后迁移，负数向前迁移")
-                Button("迁移页码") { applyBatchPageShift() }
-                    .disabled(selectedDraftIDs.isEmpty || batchPageShift == 0)
+                .frame(width: 92)
+                .disabled(selectedDraftIDs.isEmpty)
+                .onChange(of: batchLevel) { _, _ in applyBatchLevel() }
                 Button(role: .destructive) {
                     showBatchDeleteConfirmation = true
                 } label: {
-                    Label("批量删除", systemImage: "trash")
+                    Label("删除", systemImage: "trash")
                 }
                 .disabled(selectedDraftIDs.isEmpty)
             }
             List {
                 ForEach($drafts) { $draft in
+                    let draftID = draft.id
                     VStack(alignment: .leading, spacing: 7) {
                         HStack(spacing: 7) {
                             Toggle("", isOn: Binding(
-                                get: { selectedDraftIDs.contains(draft.id) },
+                                get: { selectedDraftIDs.contains(draftID) },
                                 set: { selected in
-                                    if selected { selectedDraftIDs.insert(draft.id) }
-                                    else { selectedDraftIDs.remove(draft.id) }
+                                    if selected { selectedDraftIDs.insert(draftID) }
+                                    else { selectedDraftIDs.remove(draftID) }
                                 }
                             ))
                             .labelsHidden()
@@ -1982,7 +2647,7 @@ private struct ManualOutlinePanel: View {
                             TextField("标题", text: $draft.title)
                         }
                         HStack(spacing: 8) {
-                            TextField("PDF 页", value: $draft.pdfPage, format: .number)
+                            TextField("文档页", value: $draft.pdfPage, format: .number)
                                 .frame(width: 68)
                             HStack(spacing: 3) {
                                 Button { draft.level = max(draft.level - 1, 0) } label: {
@@ -2001,17 +2666,16 @@ private struct ManualOutlinePanel: View {
                             }
                             .buttonStyle(.borderless)
                             Spacer()
-                            Button { move(draft.id, by: -1) } label: { Image(systemName: "arrow.up") }
-                                .disabled(drafts.first?.id == draft.id)
+                            Button { move(draftID, by: -1) } label: { Image(systemName: "arrow.up") }
+                                .disabled(drafts.first?.id == draftID)
                                 .help("上移")
-                            Button { move(draft.id, by: 1) } label: { Image(systemName: "arrow.down") }
-                                .disabled(drafts.last?.id == draft.id)
+                            Button { move(draftID, by: 1) } label: { Image(systemName: "arrow.down") }
+                                .disabled(drafts.last?.id == draftID)
                                 .help("下移")
-                            Button { insertRow(after: draft.id) } label: { Image(systemName: "plus") }
+                            Button { insertRow(after: draftID) } label: { Image(systemName: "plus") }
                                 .help("在下方插入")
                             Button(role: .destructive) {
-                                drafts.removeAll { $0.id == draft.id }
-                                selectedDraftIDs.remove(draft.id)
+                                removeDraft(draftID)
                             } label: {
                                 Image(systemName: "trash")
                             }
@@ -2071,6 +2735,16 @@ private struct ManualOutlinePanel: View {
         )
     }
 
+    private func removeDraft(_ id: UUID) {
+        selectedDraftIDs.remove(id)
+        // Let the row's Binding action unwind before changing the collection
+        // that owns it. Removing the final bound row synchronously can make
+        // SwiftUI resolve an index that no longer exists.
+        DispatchQueue.main.async {
+            drafts.removeAll { $0.id == id }
+        }
+    }
+
     private func move(_ id: UUID, by offset: Int) {
         guard let source = drafts.firstIndex(where: { $0.id == id }) else { return }
         let destination = source + offset
@@ -2109,15 +2783,6 @@ private struct ManualOutlinePanel: View {
         parseStatus = "已修改 \(selectedDraftIDs.count) 项层级"
     }
 
-    private func applyBatchPageShift() {
-        let selectedCount = selectedDraftIDs.count
-        for index in drafts.indices where selectedDraftIDs.contains(drafts[index].id) {
-            drafts[index].pdfPage = min(max(drafts[index].pdfPage + batchPageShift, 1), max(model.pageCount, 1))
-        }
-        parseStatus = "已迁移 \(selectedCount) 项页码 \(batchPageShift >= 0 ? "+" : "")\(batchPageShift)"
-        batchPageShift = 0
-    }
-
     private func deleteSelectedDrafts() {
         let deletedCount = selectedDraftIDs.count
         drafts.removeAll { selectedDraftIDs.contains($0.id) }
@@ -2143,25 +2808,38 @@ private struct StatusBar: View {
                 }
                 Spacer()
                 if model.document != nil {
-                    Text(model.documentTitle).lineLimit(1)
+                    Text(model.documentURL?.deletingPathExtension().lastPathComponent ?? model.documentTitle).lineLimit(1)
                 }
             }
             if model.document != nil {
-                HStack(spacing: 8) {
-                    Button { model.changePage(by: -1) } label: { Image(systemName: "chevron.up") }
-                        .disabled(model.currentPageIndex <= 0)
-                    TextField("页", text: $pageField)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 48)
-                        .multilineTextAlignment(.center)
-                        .onSubmit {
-                            if let page = Int(pageField) { model.go(to: page - 1) }
-                        }
-                    Text("/ \(model.pageCount)").monospacedDigit()
-                    Button { model.changePage(by: 1) } label: { Image(systemName: "chevron.down") }
-                        .disabled(model.currentPageIndex >= model.pageCount - 1)
+                if model.reflowBook != nil {
+                    HStack(spacing: 8) {
+                        Button { model.turnReflowPage(by: -1) } label: { Image(systemName: "chevron.left") }
+                            .disabled(model.reflowPageNumber <= 1)
+                        Text(reflowPageLabel).monospacedDigit().frame(minWidth: 74)
+                        Button { model.turnReflowPage(by: 1) } label: { Image(systemName: "chevron.right") }
+                            .disabled(model.reflowPageNumber + model.reflowSpreadCount > model.reflowPageCount)
+                    }
+                    .buttonStyle(.borderless)
+                } else {
+                    HStack(spacing: 8) {
+                        Button { model.changePage(by: -1) } label: { Image(systemName: "chevron.up") }
+                            .disabled(model.currentPageIndex <= 0)
+                        TextField("页", text: $pageField)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 48)
+                            .multilineTextAlignment(.center)
+                            .onSubmit {
+                                if let page = Int(pageField) { model.go(to: page - 1) }
+                            }
+                        Text(model.pdfTwoPages
+                             ? "–\(min(model.currentPageIndex + 2, model.pageCount)) / \(model.pageCount)"
+                             : "/ \(model.pageCount)").monospacedDigit()
+                        Button { model.changePage(by: 1) } label: { Image(systemName: "chevron.down") }
+                            .disabled(model.currentPageIndex + (model.pdfTwoPages ? 2 : 1) >= model.pageCount)
+                    }
+                    .buttonStyle(.borderless)
                 }
-                .buttonStyle(.borderless)
             }
         }
         .font(.caption)
@@ -2169,5 +2847,11 @@ private struct StatusBar: View {
         .padding(.horizontal, 10)
         .frame(height: 34)
         .background(.bar)
+    }
+
+    private var reflowPageLabel: String {
+        let start = model.reflowPageNumber
+        let end = min(model.reflowPageCount, start + model.reflowSpreadCount - 1)
+        return end > start ? "\(start)–\(end) / \(model.reflowPageCount)" : "\(start) / \(model.reflowPageCount)"
     }
 }

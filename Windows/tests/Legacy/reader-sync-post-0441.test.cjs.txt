@@ -1,0 +1,77 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+
+test('人物批量添加同时保留主名、多别名及信息中的斜杠', async () => {
+ const {CharacterManager}=await import('../src/shared/characters.mjs'); const m=new CharacterManager();
+ assert.equal(m.addFromBatch('阿辽沙/阿廖沙/阿辽沙：兄弟/朋友\n Ivan／Vanya／ivan：人物\n单名：信息'),3);
+ assert.deepEqual(m.characters.map(c=>[c.names,c.information]),[[['阿辽沙','阿廖沙'],'兄弟/朋友'],[['Ivan','Vanya'],'人物'],[['单名'],'信息']]);
+ assert.equal(m.parseBatchLine('/别名：没有主名'),null);
+});
+test('PDF 当前可见裁切保存归一化比例，并可按不同页面尺寸还原',async()=>{
+ const {visiblePageRegion,lockedPageScale}=await import('../src/shared/pdf-reading-geometry.mjs');
+ const r=visiblePageRegion({left:-100,top:-160,width:1000,height:1400},{left:0,top:0,right:700,bottom:980});
+ assert.deepEqual(r,{x:.1,y:160/1400,width:.7000000000000001,height:.7});
+ assert.ok(Math.abs(lockedPageScale(r,{width:1000,height:1400},{width:700,height:980})-1)<1e-10);
+ assert.ok(Math.abs(lockedPageScale(r,{width:500,height:700},{width:700,height:980})-2)<1e-10);
+});
+test('PDF/OCR 划线合并同一行的小间断，收窄高度并保留行列间隔',async()=>{
+ const {highlightLineRects}=await import('../src/shared/pdf-reading-geometry.mjs');
+ const r=highlightLineRects([{left:10,top:0,width:30,height:20},{left:42,top:1,width:30,height:19},{left:10,top:18,width:65,height:20},{left:200,top:0,width:40,height:20}]);
+ assert.equal(r.length,3);const first=r.find(x=>x.left===9.5&&x.top<10);assert.equal(first.width,63);assert.ok(first.height<=14);const next=r.find(x=>x.top>18);assert.ok(first.top+first.height<next.top);assert.ok(r.some(x=>x.left===199.5));
+});
+test('Electron 关闭窗口前等待进度落盘，并限制确认消息到自己的窗口',()=>{
+ const main=fs.readFileSync(path.join(__dirname,'../src/main/main.cjs'),'utf8');
+ const app=fs.readFileSync(path.join(__dirname,'../src/renderer/app.mjs'),'utf8');
+ assert.match(main,/window\.webContents\.send\('project:flush'\)/);assert.match(main,/windows\.get\(event\.sender\.id\)/);assert.match(app,/try \{ await persist\(\); \} catch/);
+});
+
+ test('OCR punctuation and shifted words share one continuous baseline without crossing rows or columns', async()=>{
+ const {highlightLineRects}=await import('../src/shared/pdf-reading-geometry.mjs');
+ const output=highlightLineRects([{left:10,top:15,width:25,height:20},{left:42,top:28,width:4,height:6},{left:64,top:17,width:46,height:18},{left:10,top:40,width:90,height:20},{left:180,top:15,width:30,height:20}]);
+  assert.equal(output.length,3);assert.deepEqual(output[0],{left:9.5,top:18.8,width:101,height:12.4});
+ });
+
+test('OCR 同一行较宽的分词空隙连续填色且不跨越分栏', async()=>{
+ const {highlightLineRects}=await import('../src/shared/pdf-reading-geometry.mjs');
+ const output=highlightLineRects([{left:10,top:10,width:40,height:16},{left:90,top:11,width:30,height:15},{left:126,top:10,width:40,height:16},{left:230,top:10,width:90,height:16}]);
+ assert.equal(output.length,2);assert.deepEqual(output[0],{left:9.5,top:13.04,width:157,height:9.92});assert.equal(output[1].left,229.5);
+ const shifted=highlightLineRects([{left:170,top:746,width:360,height:55},{left:708,top:752,width:386,height:48}]);
+ assert.equal(shifted.length,1);assert.equal(shifted[0].left,169.5);assert.equal(shifted[0].width,925);
+});
+
+test('电影理论史评 OCR 预览同行无中缝、异常高行框不与上下行叠色', async()=>{
+ const {highlightLineRects}=await import('../src/shared/pdf-reading-geometry.mjs');
+ const split=highlightLineRects([
+  {left:170.6393,top:746.9225,width:436.295,height:55.02},
+  {left:633.2205,top:746.9225,width:461.0585,height:55.02}
+ ]);
+ assert.equal(split.length,1);assert.equal(split[0].left,170.1393);assert.ok(Math.abs(split[0].width-924.6397)<1e-7);
+ const rows=highlightLineRects([
+  {left:196.4933,top:377.7458,width:921.9367,height:58.2853},
+  {left:194.092,top:305.0858,width:939.783,height:80.5412},
+  {left:196.4642,top:271.2602,width:921.8048,height:58.5355}
+ ]).sort((a,b)=>a.top-b.top);
+ assert.equal(rows.length,3);
+ assert.ok(rows[0].top+rows[0].height<rows[1].top);
+ assert.ok(rows[1].top+rows[1].height<rows[2].top);
+ assert.ok(rows[1].height<33);
+});
+
+test('Windows OCR 拖拽只显示单层自绘淡蓝色预览',()=>{
+ const css=fs.readFileSync(path.join(__dirname,'../src/renderer/styles.css'),'utf8');
+ const controller=fs.readFileSync(path.join(__dirname,'../src/renderer/pdf-controller.mjs'),'utf8');
+ assert.match(css,/\.ocr-text-layer \{[^}]*user-select: none/);
+ assert.match(css,/\.ocr-text-layer span::selection \{[^}]*background: transparent/);
+ assert.match(controller,/window\.getSelection\(\)\?\.removeAllRanges\(\);\s*this\.renderTransientSelection\(this\.combineWithPending\(selection\)\.fragments\)/);
+ assert.match(controller,/while \(layer\.children\.length < bands\.length\)/);
+ assert.match(controller,/if \(this\.ocrDragFrame\) return;/);
+ assert.doesNotMatch(controller,/if \(this\.ocrDragFrame\) cancelAnimationFrame\(this\.ocrDragFrame\);\s*const start = this\.ocrDragStart/);
+ assert.match(controller,/signature === this\.transientSelectionSignature && previewIsComplete/);
+ assert.match(controller,/this\.renderTransientSelection\(\[\]\);/);
+ assert.match(css,/\.reading-mark-layer\.selection-preview-layer \{[^}]*opacity: \.18/);
+ assert.match(css,/\.selection-preview-layer \.selection-preview \{[^}]*background: rgb\(88, 145, 241\)/);
+ assert.doesNotMatch(controller,/if \(this\.highlightMode\) \{\s*this\.callbacks\.onCreateMark/);
+ assert.match(controller,/this\.renderSelectionPreview\(\);\s*const complete[\s\S]*this\.onSelection\?\.\(event, complete\)/);
+});

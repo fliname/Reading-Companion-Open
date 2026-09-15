@@ -6,8 +6,7 @@ export function normalizeSelectionPart(value = '') {
 
 export function formatSelectionParts(parts = []) {
   const normalized = parts.map(normalizeSelectionPart).filter(Boolean);
-  if (normalized.length <= 1) return normalized[0] || '';
-  return normalized.map(part => `• ${part}`).join('\n');
+  return normalized.join('');
 }
 
 export function normalizeGroupedSelectionText(value = '') {
@@ -16,5 +15,5 @@ export function normalizeGroupedSelectionText(value = '') {
   if (lines.length > 1 && lines.every(line => line.startsWith('•'))) {
     return formatSelectionParts(lines.map(line => line.replace(/^•\s*/, '')));
   }
-  return normalizeSelectionPart(source);
+  return lines.length > 1 ? formatSelectionParts(lines) : normalizeSelectionPart(source);
 }

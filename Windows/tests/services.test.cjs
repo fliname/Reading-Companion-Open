@@ -18,6 +18,74 @@ test('API Base URL 兼容官方与独立中转站', () => {
   assert.equal(providerKind('https://api.anthropic.com'), 'anthropic');
 });
 
+test('虚构类伴读不加载学术框架或碰撞问题并限制为短回答', () => {
+  const { freeCompanionInstructions, freeModeBudgetInstructions, fictionPageRangeSummaryInstructions } = require('../src/main/ai-service.cjs');
+  assert.match(freeCompanionInstructions, /不加载学术伴读框架/);
+  assert.match(freeCompanionInstructions, /不追加碰撞问题/);
+  assert.match(freeModeBudgetInstructions, /120–300/);
+  assert.match(fictionPageRangeSummaryInstructions, /150–250/);
+});
+
+test('深读回答达到单次输出上限后自动续写而不抛错', async () => {
+  const originalFetch = global.fetch;
+  const payloads = [
+    { choices: [{ message: { content: '前半段，' }, finish_reason: 'length' }], usage: { prompt_tokens: 10, completion_tokens: 3 } },
+    { choices: [{ message: { content: '后半段完整结束。' }, finish_reason: 'stop' }], usage: { prompt_tokens: 14, completion_tokens: 5 } }
+  ];
+  global.fetch = async () => new Response(JSON.stringify(payloads.shift()), { headers: { 'content-type': 'application/json' } });
+  try {
+    const { requestAI } = require('../src/main/ai-service.cjs');
+    let streamed = '';
+    const result = await requestAI({
+      id: 'continuation-test', apiKey: 'test', baseURL: 'https://example.com/v1', model: 'test-model',
+      system: 'test', messages: [{ role: 'user', content: '回答' }], maxTokens: 8000,
+      maxContinuations: 3, reasoningEffort: 'medium'
+    }, delta => { streamed += delta; });
+    assert.equal(result.text, '前半段，后半段完整结束。');
+    assert.equal(streamed, result.text);
+    assert.equal(result.continuationCount, 1);
+    assert.equal(result.incomplete, false);
+    assert.deepEqual(result.usage, { inputTokens: 24, outputTokens: 8, cachedTokens: 0, reasoningTokens: 0 });
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('多次触顶后用短结论强制收束并保留答案', async () => {
+  const originalFetch = global.fetch;
+  const payloads = [
+    { choices: [{ message: { content: '主体论证。' }, finish_reason: 'length' }] },
+    { choices: [{ message: { content: '补充论证。' }, finish_reason: 'length' }] },
+    { choices: [{ message: { content: '最终结论。' }, finish_reason: 'stop' }] }
+  ];
+  global.fetch = async () => new Response(JSON.stringify(payloads.shift()), { headers: { 'content-type': 'application/json' } });
+  try {
+    const { requestAI } = require('../src/main/ai-service.cjs');
+    const result = await requestAI({
+      id: 'compact-rescue-test', apiKey: 'test', baseURL: 'https://example.com/v1', model: 'test-model',
+      system: 'test', messages: [{ role: 'user', content: '回答' }], maxTokens: 8000,
+      maxContinuations: 1, reasoningEffort: 'medium'
+    });
+    assert.equal(result.text, '主体论证。补充论证。最终结论。');
+    assert.equal(result.usedCompactRescue, true);
+    assert.equal(result.incomplete, false);
+    assert.equal(result.continuationCount, 2);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('更新服务只选择版本更高的 Windows 安装包', () => {
+  const { compareVersions, selectWindowsUpdate } = require('../src/main/update-service.cjs');
+  assert.equal(compareVersions('0.43.23', '0.43.22'), 1);
+  const release = { assets: [
+    { name: 'Reading-Companion-Open-0.43.12-macOS-arm64.dmg', browser_download_url: 'https://example.com/mac' },
+    { name: 'Reading-Companion-Open-0.43.23-Windows-x64-Setup.exe', browser_download_url: 'https://example.com/win', size: 123 }
+  ] };
+  assert.equal(selectWindowsUpdate(release, '0.43.22').version, '0.43.23');
+  assert.equal(selectWindowsUpdate(release, '0.43.23'), null);
+});
+
 test('双栏 OCR 目录按列读取而不交错页码', () => {
   const { legacyTOCOrder } = require('../src/main/ocr-service.cjs');
   const line = (text, x, y) => ({ text, confidence: 90, bbox: { x0: x, x1: x + 160, y0: y, y1: y + 18 } });

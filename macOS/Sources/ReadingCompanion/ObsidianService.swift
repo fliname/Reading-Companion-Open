@@ -144,7 +144,7 @@ enum OutlineNoteLocator {
 
 enum ObsidianNoteBuilder {
     static func skeleton(title: String, sourcePath: String?, outline: [OutlineEntry]) -> String {
-        var lines = ["# \(title)", ""]
+        var lines = propertyLines(title: title, sourcePath: sourcePath) + ["", "# \(title)", ""]
         for entry in outline {
             guard entry.title.trimmingCharacters(in: .whitespacesAndNewlines)
                 .localizedCaseInsensitiveCompare(title.trimmingCharacters(in: .whitespacesAndNewlines)) != .orderedSame else { continue }
@@ -153,6 +153,32 @@ enum ObsidianNoteBuilder {
         }
         lines += ["## 我的笔记", "", ""]
         return lines.joined(separator: "\n")
+    }
+
+    static func ensureProperties(in markdown: String, title: String, sourcePath: String?) -> String {
+        if markdown.hasPrefix("---\n"),
+           let end = markdown.range(of: "\n---", range: markdown.index(markdown.startIndex, offsetBy: 4)..<markdown.endIndex),
+           markdown[..<end.upperBound].components(separatedBy: .newlines).contains(where: {
+               $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                   .localizedCaseInsensitiveCompare("type: reading-note") == .orderedSame
+           }) { return markdown }
+        return (propertyLines(title: title, sourcePath: sourcePath) + ["", markdown])
+            .joined(separator: "\n")
+    }
+
+    private static func propertyLines(title: String, sourcePath: String?) -> [String] {
+        var lines = [
+            "---",
+            "title: \(yamlQuoted(title))",
+            "type: reading-note"
+        ]
+        if let sourcePath, !sourcePath.isEmpty {
+            lines.append("source: \(yamlQuoted(sourcePath))")
+            let format = URL(fileURLWithPath: sourcePath).pathExtension.lowercased()
+            if !format.isEmpty { lines.append("format: \(yamlQuoted(format))") }
+        }
+        lines += ["tags:", "  - reading-companion", "---"]
+        return lines
     }
 
     static func highlightBlock(_ highlight: HighlightRecord) -> String {
@@ -164,7 +190,7 @@ enum ObsidianNoteBuilder {
                 "> *原文：* \(displayedText)"
             ]
             if let note = highlight.note, !note.isEmpty {
-                lines += [">", "> \(note.replacingOccurrences(of: "\n", with: "\n> "))"]
+                lines += [">", "> \(blueAnnotation(note))"]
             }
             return lines.joined(separator: "\n")
         }
@@ -173,9 +199,21 @@ enum ObsidianNoteBuilder {
             "> \(displayedText)"
         ]
         if let note = highlight.note, !note.isEmpty {
-            lines += ["", "> [!note] 批注", "> \(note.replacingOccurrences(of: "\n", with: "\n> "))"]
+            lines += ["", "> [!note] 批注", "> \(blueAnnotation(note))"]
         }
         return lines.joined(separator: "\n")
+    }
+
+    private static func yamlQuoted(_ value: String) -> String {
+        "\"" + value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n") + "\""
+    }
+
+    private static func blueAnnotation(_ value: String) -> String {
+        let safe = markdownSafeOriginalText(value).replacingOccurrences(of: "\n", with: "\n> ")
+        return "<span style=\"color: #3b82f6;\">\(safe)</span>"
     }
 
     /// PDF/OCR text is quoted as literal source material. Escaping Markdown
@@ -328,11 +366,15 @@ enum ObsidianNoteBuilder {
             with: "",
             options: .regularExpression
         )
-        result = result.replacingOccurrences(
+        if let frontmatter = result.range(
             of: #"\A---\s*\n(?s:.*?)\n---\s*\n*"#,
-            with: "",
             options: .regularExpression
-        )
+        ), result[frontmatter].range(
+            of: #"(?mi)^type:\s*reading-companion\s*$"#,
+            options: .regularExpression
+        ) != nil {
+            result.removeSubrange(frontmatter)
+        }
         result = result.replacingOccurrences(
             of: #"(?m)^> \[!info\] 原文\s*\n> `[^\n]*`\s*\n*"#,
             with: "",
@@ -387,7 +429,11 @@ actor ObsidianService {
             try markdown.write(to: noteURL, atomically: true, encoding: .utf8)
         } else {
             let current = try String(contentsOf: noteURL, encoding: .utf8)
-            let migrated = ObsidianNoteBuilder.migrateLegacyMarkdown(current)
+            let migrated = ObsidianNoteBuilder.ensureProperties(
+                in: ObsidianNoteBuilder.migrateLegacyMarkdown(current),
+                title: title,
+                sourcePath: sourcePath
+            )
             let synchronized = ObsidianNoteBuilder.ensureOutlineHeadings(in: migrated, outline: outline)
             if synchronized != current {
                 try synchronized.write(to: noteURL, atomically: true, encoding: .utf8)

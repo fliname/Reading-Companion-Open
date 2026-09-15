@@ -6,6 +6,7 @@
 - PDF.js (`pdfjs-dist`) — Apache License 2.0
 - Tesseract.js — Apache License 2.0
 - Marked — MIT License
+- libmobi 0.12 与 `mobitool` — LGPL-3.0-or-later。安装包将其作为独立进程用于在本机把无 DRM 的 MOBI/KF8/AZW3 转换到电子书导入管线；许可证全文随应用保存在 `BookConverter/COPYING.LGPL-3.0`。
 
 OCR 语言数据来自 Tesseract tessdata 项目，其许可与上游声明随相应文件适用。
 

@@ -112,6 +112,8 @@ actor OpenAIService {
         apiKey: String,
         provider: AIProvider,
         readingDepth: AIReadingDepth,
+        companionMode: AICompanionMode = .academic,
+        usesLJGReadSkill: Bool = true,
         usesWebSearch: Bool = false,
         usesWholeBook: Bool = false,
         bookOutline: [OutlineEntry] = [],
@@ -163,34 +165,43 @@ actor OpenAIService {
             每项严格使用两行：第一行 `### [资源名称](完整 URL)`；第二行只用一句话说明它与原文的关系和为什么值得看。不要追加更多链接、搜索过程或泛泛建议。
             """
             : ""
-        let turnInstructions = Self.ljgReadTurnInstructions(
-            priorTurns: priorTurns,
-            usesWebSearch: usesWebSearch
+        let turnInstructions = companionMode == .academic && usesLJGReadSkill
+            ? Self.ljgReadTurnInstructions(priorTurns: priorTurns, usesWebSearch: usesWebSearch)
+            : ""
+        let responseBudgetInstructions = companionMode == .academic
+            ? Self.responseBudgetInstructions(for: readingDepth)
+            : Self.freeModeBudgetInstructions
+        let baseInstructions = Self.baseCompanionInstructions(
+            companionMode: companionMode,
+            usesLJGReadSkill: usesLJGReadSkill
         )
-        let responseBudgetInstructions = Self.responseBudgetInstructions(for: readingDepth)
+        let outputLimit = companionMode == .academic ? readingDepth.outputLimit : 900
+        let reasoningEffort = companionMode == .academic ? readingDepth.reasoningEffort : "low"
         var completion = try await completeText(
-            system: Self.companionInstructions + responseBudgetInstructions + turnInstructions + searchInstructions,
+            system: baseInstructions + responseBudgetInstructions + turnInstructions + searchInstructions,
             input: input,
             model: model,
             apiKey: apiKey,
             provider: provider,
-            maxTokens: readingDepth.outputLimit,
-            reasoningEffort: readingDepth.reasoningEffort,
+            maxTokens: outputLimit,
+            reasoningEffort: reasoningEffort,
             usesWebSearch: usesWebSearch,
-            promptCacheKey: Self.promptCacheKey(model: model, cacheIdentity: cacheIdentity),
+            promptCacheKey: Self.promptCacheKey(model: model, cacheIdentity: cacheIdentity, companionMode: companionMode, usesLJGReadSkill: usesLJGReadSkill),
             timeout: 120
         )
         if completion.wasTruncated {
             completion = try await completeText(
-                system: Self.companionInstructions + responseBudgetInstructions + turnInstructions + searchInstructions + "\n上一次回答被服务商截断。本次必须进一步压缩次要例子，在目标篇幅内完整写完所有句子、列表和结论；不得以半句话、悬空标题或未完成项目结束。",
+                system: baseInstructions + responseBudgetInstructions + turnInstructions + searchInstructions + "\n上一次回答被服务商截断。本次必须进一步压缩，在目标篇幅内完整写完；不得留下半句话或未完成项目。",
                 input: input,
                 model: model,
                 apiKey: apiKey,
                 provider: provider,
-                maxTokens: min(12_000, max(readingDepth.outputLimit * 2, readingDepth.outputLimit + 1_200)),
-                reasoningEffort: readingDepth.reasoningEffort,
+                maxTokens: companionMode == .academic
+                    ? min(12_000, max(outputLimit * 2, outputLimit + 1_200))
+                    : 1_500,
+                reasoningEffort: reasoningEffort,
                 usesWebSearch: usesWebSearch,
-                promptCacheKey: Self.promptCacheKey(model: model, cacheIdentity: cacheIdentity),
+                promptCacheKey: Self.promptCacheKey(model: model, cacheIdentity: cacheIdentity, companionMode: companionMode, usesLJGReadSkill: usesLJGReadSkill),
                 timeout: 180
             )
         }
@@ -289,9 +300,41 @@ actor OpenAIService {
         nextChapter: (String, [TextChunk])?,
         model: String,
         apiKey: String,
-        provider: AIProvider
+        provider: AIProvider,
+        companionMode: AICompanionMode = .academic
     ) async throws -> String {
         let source = Self.boundedChapterSource(context)
+        if companionMode == .free {
+            let input = "章节：\(chapterTitle)\n\n章节原文：\n\(source)"
+            var completion = try await completeText(
+                system: Self.freeChapterSummaryInstructions,
+                input: input,
+                model: model,
+                apiKey: apiKey,
+                provider: provider,
+                maxTokens: 700,
+                reasoningEffort: "low",
+                timeout: 120
+            )
+            if completion.wasTruncated || completion.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                completion = try await completeText(
+                    system: Self.freeChapterSummaryInstructions + "\n上一次没有完整收束；这次进一步压缩，但必须写完一段完整的话。",
+                    input: input,
+                    model: model,
+                    apiKey: apiKey,
+                    provider: provider,
+                    maxTokens: 1_000,
+                    reasoningEffort: "low",
+                    timeout: 120
+                )
+            }
+            guard !completion.wasTruncated else { throw ServiceError.truncatedResponse }
+            let paragraph = completion.text
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !paragraph.isEmpty else { throw ServiceError.invalidResponse }
+            return paragraph
+        }
         let instructions = Self.inlineChapterSummaryInstructions
         let previous = previousChapter.map {
             "上一同级章节：\($0.0)\n\(Self.boundedChapterSource($0.1, limit: 4_000))"
@@ -326,6 +369,84 @@ actor OpenAIService {
             throw ServiceError.incompleteChapterSummary
         }
         return completion.text
+    }
+
+    func generateFictionPageRangeSummary(
+        pageLabel: String,
+        context: [TextChunk],
+        model: String,
+        apiKey: String,
+        provider: AIProvider
+    ) async throws -> String {
+        let input = "页码范围：\(pageLabel)\n\n所选页码原文：\n\(Self.boundedChapterSource(context))"
+        var completion = try await completeText(
+            system: Self.fictionPageRangeSummaryInstructions,
+            input: input,
+            model: model,
+            apiKey: apiKey,
+            provider: provider,
+            // The API limit also includes hidden reasoning for some models.
+            // Keep ample safety headroom while the prompt constrains the
+            // visible paragraph to roughly 150–250 Chinese characters.
+            maxTokens: Self.fictionSummaryInitialTokenLimit,
+            reasoningEffort: "low",
+            timeout: 120
+        )
+        if completion.wasTruncated || completion.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            completion = try await completeText(
+                system: Self.fictionPageRangeSummaryInstructions + "\n上一次没有完整收束；这次进一步压缩，但必须写完一段完整的话。",
+                input: input,
+                model: model,
+                apiKey: apiKey,
+                provider: provider,
+                maxTokens: Self.fictionSummaryRetryTokenLimit,
+                reasoningEffort: "low",
+                timeout: 120
+            )
+        }
+        guard !completion.wasTruncated else { throw ServiceError.truncatedPageRangeSummary }
+        let paragraph = Self.normalizedFictionSummary(completion.text)
+        guard !paragraph.isEmpty else { throw ServiceError.invalidResponse }
+        return paragraph
+    }
+
+    static let fictionSummaryInitialTokenLimit = 2_500
+    static let fictionSummaryRetryTokenLimit = 5_000
+
+    /// Keeps a provider that ignores the requested visible length from turning
+    /// a compact sidebar summary into another long-form reading response.
+    static func normalizedFictionSummary(
+        _ source: String,
+        preferredLimit: Int = 250,
+        hardLimit: Int = 280
+    ) -> String {
+        let paragraph = source
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard preferredLimit > 0, hardLimit >= preferredLimit, paragraph.count > hardLimit else {
+            return paragraph
+        }
+
+        let characters = Array(paragraph.prefix(hardLimit))
+        let minimumNaturalEnding = min(150, preferredLimit)
+        if let boundary = characters.indices.reversed().first(where: {
+            $0 >= minimumNaturalEnding && "。！？!?".contains(characters[$0])
+        }) {
+            return String(characters[...boundary])
+        }
+        if let boundary = characters.indices.reversed().first(where: {
+            $0 >= minimumNaturalEnding && "；;，,".contains(characters[$0])
+        }) {
+            let clause = String(characters[..<boundary])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return clause + "。"
+        }
+
+        let clipped = String(paragraph.prefix(preferredLimit))
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(
+                CharacterSet(charactersIn: "，,：:；;")
+            ))
+        return clipped + (clipped.last.map { "。！？!?".contains($0) } == true ? "" : "。")
     }
 
     static func boundedChapterSource(_ chunks: [TextChunk], limit: Int = 36_000) -> String {
@@ -389,6 +510,14 @@ actor OpenAIService {
       - 启下：本章为下一章原文中的什么任务作准备
     如果只能依据相邻章节标题猜测，必须完全省略“章际关系”，不得输出“仅据标题判断”、全书起点或全书收束。
     每个一级项目和每个子项目必须各自独占一行，禁止把多个项目串在同一行。每个子项目用 `**` 只标出一个最关键的概念、判断或逻辑动作（2–16 字），不要把整句加粗。每点使用短语或紧凑句；论证部分保持逻辑顺序；关键判断尽量附 PDF 页码 `P数字`。根据章节复杂度控制在 250–450 字；必须完整写完必选结构，不能留下半句话、未完成列表或悬空标题。
+    """
+
+    static let freeChapterSummaryInstructions = """
+    严格依据提供的章节原文，用一个简短自然段概括本章发生了什么、主要人物或对象及最值得记住的一点。适合小说和一般阅读，控制在 100–220 个汉字；不要使用标题、列表、问题—论证—结论框架、章际关系或碰撞问题，不要补写原文没有的事实。
+    """
+
+    static let fictionPageRangeSummaryInstructions = """
+    严格依据用户所选页码范围内的小说原文，用一个简短自然段概括这段文字中发生了什么、涉及哪些主要人物，以及最值得记住的情节或变化。只概括输入范围，不把它误写成完整章节，也不补写范围外的前因后果。无论输入页数多少，都只输出约 150–250 个汉字，优先控制在 180–220 个汉字；内容很多时主动舍弃次要细节，不得因输入较长而增加篇幅。不要使用标题、列表、问题—论证—结论框架、章际关系或碰撞问题，必须用完整句子自然结束。
     """
 
     struct ProviderDetection: Sendable {
@@ -667,8 +796,13 @@ actor OpenAIService {
         return id.hasPrefix("gpt-5") || id.hasPrefix("o1") || id.hasPrefix("o3") || id.hasPrefix("o4")
     }
 
-    private static func promptCacheKey(model: String, cacheIdentity: String) -> String {
-        let digest = SHA256.hash(data: Data(("ljg-read-v1.3\u{1F}" + model + "\u{1F}" + cacheIdentity).utf8))
+    private static func promptCacheKey(
+        model: String,
+        cacheIdentity: String,
+        companionMode: AICompanionMode,
+        usesLJGReadSkill: Bool
+    ) -> String {
+        let digest = SHA256.hash(data: Data(("companion-v1.5\u{1F}" + companionMode.rawValue + "\u{1F}" + usesLJGReadSkill.description + "\u{1F}" + model + "\u{1F}" + cacheIdentity).utf8))
             .prefix(12).map { String(format: "%02x", $0) }.joined()
         return "reading-companion-\(digest)"
     }
@@ -1140,6 +1274,29 @@ actor OpenAIService {
     </ljg_read_protocol>
     """
 
+    static let standardCompanionInstructions = """
+    你是 Reading Companion 的原文问答助手。默认使用中文，只依据提供的原文和明确标注的外部资料回答。涉及文本判断时引用提供的页码；证据不足时直接说明，不编造页码、章节、引文或作者观点。先给出直接答案，再补充回答所必需的原文依据。保持自然、清晰的 Markdown，不强制固定结构，不追加碰撞问题，不使用额外伴读框架。
+    """
+
+    static func baseCompanionInstructions(
+        companionMode: AICompanionMode,
+        usesLJGReadSkill: Bool
+    ) -> String {
+        guard companionMode == .academic else { return freeCompanionInstructions }
+        return usesLJGReadSkill ? companionInstructions : standardCompanionInstructions
+    }
+
+    static let freeCompanionInstructions = """
+    你是 Reading Companion 的虚构类伴读，主要陪读小说、戏剧和其他叙事文本。直接回答读者提出的事实问题；需要文学分析时，只做与当前问题有关的适度分析。严格依据提供的原文，不编造人物、情节、页码或作者意图；证据不足就简短说明。默认使用中文，不加载学术伴读框架（非虚构类），不追加碰撞问题，不强制小标题、列表或固定结构。
+    """
+
+    static let freeModeBudgetInstructions = """
+
+    <response_budget max_output_tokens="900">
+    默认用 120–300 个汉字完成回答；简单事实问题尽量在 1–3 句内回答，文学分析最多使用三个短段。只保留直接答案和必要依据，不重复问题，不写开场白、总结或延伸提问，并在篇幅内完整结束。
+    </response_budget>
+    """
+
     static func responseBudgetInstructions(for depth: AIReadingDepth) -> String {
         let target: String
         switch depth {
@@ -1225,6 +1382,7 @@ actor OpenAIService {
         case requestFailed(String)
         case emptyResponse
         case truncatedResponse
+        case truncatedPageRangeSummary
         case incompleteCondensation
         case incompleteChapterSummary
 
@@ -1254,6 +1412,7 @@ actor OpenAIService {
             case .requestFailed(let detail): "AI 请求失败：\(detail)"
             case .emptyResponse: "AI 服务商返回了空响应。"
             case .truncatedResponse: "AI 两次都在整理完成前达到输出上限，因此没有写入不完整的笔记。请减少本次选择的对话数量后重试。"
+            case .truncatedPageRangeSummary: "AI 两次都在概要完成前达到生成上限，因此没有保存残缺结果。所选页数只影响需要阅读的原文量，不会增加概要篇幅；请重试或切换模型。"
             case .incompleteCondensation: "AI 返回的整理内容明显不完整，因此没有写入笔记。请减少本次选择的对话数量，或切换更适合长文本的模型后重试。"
             case .incompleteChapterSummary: "AI 两次都没有完整生成章节概要，因此没有保存残缺结果。请切换更适合长文本的模型后重新生成。"
             }

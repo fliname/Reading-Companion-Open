@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; connect-src 'self'; worker-src 'self' blob:;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; connect-src 'self'; worker-src 'self' blob:; frame-src 'self' blob:;">
   <title>Reading Companion Open</title>
   <link rel="stylesheet" href="./vendor/pdf_viewer.css">
   <link rel="stylesheet" href="./styles.css">
@@ -35,6 +35,8 @@
     <symbol id="icon-book-closed" viewBox="0 0 24 24"><path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3z"></path><path d="M8 4v16M8 16h11"></path></symbol>
     <symbol id="icon-open-note" viewBox="0 0 24 24"><rect x="4" y="5" width="13" height="15" rx="2"></rect><path d="M12 3h9v9M21 3l-10 10"></path></symbol>
     <symbol id="icon-arrow-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="m9 8 4 4-4 4M13 12h5"></path></symbol>
+    <symbol id="icon-people" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"></circle><path d="M3.5 19c0-3 2.5-5 5.5-5s5.5 2 5.5 5"></path><circle cx="16.5" cy="9" r="2.6"></circle><path d="M15.5 14.3c2.6.3 4.5 2 4.5 4.7"></path></symbol>
+    <symbol id="icon-columns" viewBox="0 0 24 24"><rect x="3" y="5" width="8" height="14" rx="1"></rect><rect x="13" y="5" width="8" height="14" rx="1"></rect></symbol>
   </svg>
   <div id="app">
     <header class="toolbar">
@@ -48,6 +50,7 @@
       <button id="zoomIn" class="icon-button" title="放大"><svg class="app-icon"><use href="#icon-zoom-in"></use></svg></button>
       <button id="rotatePage" class="icon-button" title="顺时针旋转"><svg class="app-icon"><use href="#icon-rotate"></use></svg></button>
       <button id="lockScroll" class="icon-button" title="锁定左右滑动与缩放"><svg class="app-icon"><use href="#icon-lock"></use></svg></button>
+      <button id="reflowSpread" class="icon-button hidden" title="单页 / 双页"><svg class="app-icon"><use href="#icon-columns"></use></svg></button>
       <span class="separator"></span>
       <button id="toggleBookmark" class="icon-button bookmark-button" title="添加当前页书签"><svg class="app-icon"><use href="#icon-bookmark"></use></svg></button>
       <div class="highlight-tool">
@@ -69,6 +72,7 @@
           <button data-sidebar-tab="bookmarks" title="书签" aria-label="书签"><svg class="app-icon"><use href="#icon-bookmark"></use></svg></button>
           <button data-sidebar-tab="highlights" title="划线与批注" aria-label="划线与批注"><svg class="app-icon"><use href="#icon-highlighter"></use></svg></button>
           <button data-sidebar-tab="search" title="搜索" aria-label="搜索"><svg class="app-icon"><use href="#icon-search"></use></svg></button>
+          <button data-sidebar-tab="characters" title="人物" aria-label="人物" id="charactersTabButton" class="hidden"><svg class="app-icon"><use href="#icon-people"></use></svg></button>
         </nav>
         <section id="outlinePanel" class="sidebar-panel active">
           <div class="panel-header outline-header">
@@ -128,6 +132,13 @@
           <p id="searchCount" class="subtle"></p>
           <div id="searchResults" class="record-list"></div>
         </section>
+        <section id="charactersPanel" class="sidebar-panel">
+          <div class="panel-header stacked">
+            <div class="panel-title-row"><h2>人物索引</h2><span class="panel-title-spacer"></span><button id="manageCharacters" class="small-button">管理</button></div>
+            <p id="charactersStatus" class="subtle">为小说中的人物建立档案</p>
+          </div>
+          <div id="characterList" class="character-list"></div>
+        </section>
       </aside>
 
       <div id="leftColumnResizer" class="column-resizer" data-resizer="left" role="separator" aria-label="调整导航栏宽度" aria-orientation="vertical"></div>
@@ -135,12 +146,15 @@
       <section id="readerArea" class="reader-area">
         <div id="emptyState" class="empty-state">
           <div class="empty-icon">▤</div>
-          <h1>打开 PDF 开始伴读</h1>
-          <p>拖放 PDF 到这里，或点击“选择 PDF”。<br>文本页直接索引，扫描页在本机 OCR。</p>
-          <button id="emptyOpenPDF" class="primary-button">选择 PDF…</button>
+          <h1>打开图书开始伴读</h1>
+          <p>支持 PDF、EPUB、AZW3、MOBI 四种格式。<br>拖放文件到这里，或点击下方按钮选择。</p>
+          <button id="emptyOpenPDF" class="primary-button">选择图书…</button>
         </div>
         <div id="viewerContainer" class="viewer-container hidden">
           <div id="pdfViewer" class="pdfViewer"></div>
+        </div>
+        <div id="reflowContainer" class="reflow-container hidden">
+          <div id="reflowViewport" class="reflow-viewport"></div>
         </div>
         <div id="selectionToolbar" class="selection-toolbar hidden">
           <span class="selection-label"><svg class="app-icon"><use href="#icon-highlighter"></use></svg></span>
@@ -161,10 +175,18 @@
 
       <aside id="assistantPanel" class="assistant-panel">
         <div class="assistant-header">
-          <div class="assistant-title-row"><h2 id="assistantPanelTitle">AI 伴读</h2><span class="assistant-title-spacer"></span><button id="pasteManualOutline" class="manual-header-action hidden" title="从剪贴板粘贴"><svg class="app-icon"><use href="#icon-copy"></use></svg><span>粘贴</span></button><button id="closeManualOutline" class="icon-button hidden" title="关闭手动目录">×</button><button id="openSettings" class="icon-button" title="设置"><svg class="app-icon"><use href="#icon-gear"></use></svg></button></div>
+          <div class="assistant-title-row"><h2 id="assistantPanelTitle">AI 伴读</h2><span class="assistant-title-spacer"></span><button id="openSettings" class="icon-button" title="设置"><svg class="app-icon"><use href="#icon-gear"></use></svg></button></div>
           <div id="apiSelectors" class="api-selectors">
-            <select id="modelSelector" title="模型"><option value="">选择模型</option></select>
-            <select id="depthSelector" title="阅读深度">
+            <div class="ai-selector-control model-selector-control">
+              <button id="modelMenuButton" class="ai-selector-button" type="button" title="切换模型" aria-haspopup="menu" aria-expanded="false"><span id="modelMenuLabel">选择模型</span><span class="selector-chevron">⌄</span></button>
+              <div id="modelMenu" class="ai-selector-menu model-menu hidden" role="menu" aria-label="模型"></div>
+            </div>
+            <div class="ai-selector-control depth-selector-control">
+              <button id="depthMenuButton" class="ai-selector-button" type="button" title="切换阅读模式" aria-haspopup="menu" aria-expanded="false"><span id="depthMenuLabel">均衡</span><span class="selector-chevron">⌄</span></button>
+              <div id="depthMenu" class="ai-selector-menu depth-menu hidden" role="menu" aria-label="阅读模式"></div>
+            </div>
+            <select id="modelSelector" class="hidden" aria-hidden="true" tabindex="-1"><option value="">选择模型</option></select>
+            <select id="depthSelector" class="hidden" aria-hidden="true" tabindex="-1">
               <option value="economical">节省</option>
               <option value="balanced" selected>均衡</option>
               <option value="deep">深读</option>
@@ -184,6 +206,7 @@
             <button data-quick-question="解释一下">解释一下</button>
             <button data-quick-question="联系上下文">联系上下文</button>
             <button data-quick-question="链接资源">链接资源</button>
+            <label class="whole-book skill-switch" title="开启或关闭 ljg-read 伴读 Skill"><input id="ljgReadSkill" type="checkbox" checked>ljg-read</label>
             <label class="whole-book"><input id="wholeBook" type="checkbox">联系全书</label>
           </div>
           <div class="composer">
@@ -217,9 +240,6 @@
                 <option value="0">第 1 级</option><option value="1">第 2 级</option><option value="2">第 3 级</option>
                 <option value="3">第 4 级</option><option value="4">第 5 级</option><option value="5">第 6 级</option>
               </select>
-              <button id="applyManualBatchLevel">应用层级</button>
-              <input id="manualPageShift" type="number" value="0" aria-label="页差" title="正数向后迁移，负数向前迁移">
-              <button id="shiftManualPages">迁移页码</button>
               <button id="deleteManualEntries" class="danger">删除</button>
             </div>
             <div id="manualOutlinePreview" class="manual-preview"></div>
@@ -232,15 +252,36 @@
           </div>
         </section>
 
+        <section id="characterManagementPanel" class="assistant-mode">
+          <div class="character-management-header">
+            <h2>人物管理</h2>
+            <label><input id="characterHighlightsToggle" type="checkbox" checked>文中高亮</label>
+            <button id="saveCharacters" class="primary-button">保存</button>
+          </div>
+          <div class="character-management-body">
+            <section><h3>批量识别</h3><p class="subtle">每行一位人物：人物名字/别名/另一个别名：信息。别名可省略。</p>
+              <textarea id="characterBatchInput" rows="7" placeholder="阿辽沙/阿廖沙：卡拉马佐夫家的幼子，德米特里的弟弟&#10;伊万：知识分子，阿辽沙的兄长"></textarea>
+              <button id="addCharacterBatch" class="small-primary">批量识别</button>
+            </section>
+            <section><h3>逐个添加</h3>
+              <input id="newCharacterName" placeholder="人物名字">
+              <input id="newCharacterInfo" placeholder="身份、关系等信息">
+              <button id="addSingleCharacter" class="small-primary">添加人物</button>
+            </section>
+            <section><h3>已添加人物</h3><div id="characterEditorList" class="character-editor-list"></div></section>
+          </div>
+        </section>
+
       </aside>
     </main>
 
     <footer class="status-bar">
       <span id="statusMessage">等待打开文档</span>
       <span class="status-spacer"></span>
+      <span id="bookFileTitle"></span>
       <div class="page-navigation">
         <button id="previousPage" title="上一页">⌃</button>
-        <label><input id="pageField" value="1" inputmode="numeric"> / <span id="pageCount">0</span></label>
+        <label><input id="pageField" value="1" inputmode="numeric"><span id="spreadPageEnd"></span> / <span id="pageCount">0</span></label>
         <button id="nextPage" title="下一页">⌄</button>
       </div>
     </footer>
@@ -248,9 +289,17 @@
 
   <div id="modalBackdrop" class="modal-backdrop hidden"></div>
 
-  <dialog id="bookshelfDialog" class="app-dialog wide-dialog">
-    <header><h2>▥ 书架</h2><button data-close-dialog="bookshelfDialog">完成</button></header>
-    <div id="bookshelfList" class="bookshelf-list"></div>
+  <dialog id="bookshelfDialog" class="app-dialog wide-dialog bookshelf-dialog"></dialog>
+
+  <dialog id="importCategoryDialog" class="app-dialog category-dialog">
+    <header><h2>选择书籍类型</h2></header>
+    <div class="category-dialog-body">
+      <p id="importCategoryBookTitle" class="category-book-title"></p>
+      <p class="subtle">类型会决定 AI 伴读方式和导航功能，也可稍后在书架的批量管理中修改。</p>
+      <button data-book-category="nonfiction" class="category-choice nonfiction"><strong>非虚构类</strong><span>使用学术伴读框架、快捷问题和结构化章节概要</span></button>
+      <button data-book-category="fiction" class="category-choice fiction"><strong>虚构类</strong><span>使用简短事实回答与适度文学分析，并启用人物导航</span></button>
+      <button id="cancelImportCategory" class="category-cancel">取消</button>
+    </div>
   </dialog>
 
   <dialog id="settingsDialog" class="app-dialog settings-dialog">
@@ -298,12 +347,28 @@
         <div class="notes-content-row"><span>AI 对话</span><span id="pendingChatsCount" class="subtle"></span><span class="notes-spacer"></span><button id="notesSelectPendingChats">全选未加入</button><button id="notesDeleteChats" class="danger">删除</button></div>
         <div class="notes-options">
           <label><input type="radio" name="chatExport" value="original" checked>保留原文</label>
-          <label><input type="radio" name="chatExport" value="condensed">原文 30%</label>
+          <label><input type="radio" name="chatExport" value="condensed">整理浓缩</label>
           <label><input id="collapseConversation" type="checkbox">默认折叠</label>
           <span class="notes-spacer"></span><button id="notesAddChats"><svg class="app-icon"><use href="#icon-note"></use></svg><span>加入笔记</span></button>
         </div>
       </section>
       <div class="notes-summary" id="notesSummary"></div>
+    </div>
+  </dialog>
+
+  <dialog id="chatNoteExportDialog" class="app-dialog chat-note-export-dialog">
+    <header><h2>对话加入笔记</h2><button data-close-dialog="chatNoteExportDialog">关闭</button></header>
+    <div class="chat-note-export-body">
+      <p id="chatNoteExportCount" class="subtle">已选 0 条</p>
+      <div class="chat-note-export-modes" role="radiogroup" aria-label="写入方式">
+        <label><input type="radio" name="quickChatExport" value="original" checked><span>保留原文</span></label>
+        <label><input type="radio" name="quickChatExport" value="condensed"><span>整理浓缩</span></label>
+      </div>
+      <label class="chat-note-collapse"><input id="quickCollapseConversation" type="checkbox">默认折叠</label>
+      <div class="chat-note-export-actions">
+        <button class="chat-note-export-cancel" data-close-dialog="chatNoteExportDialog">取消</button>
+        <button id="confirmChatNoteExport" class="primary-button"><svg class="app-icon"><use href="#icon-note"></use></svg><span>确认加入</span></button>
+      </div>
     </div>
   </dialog>
 

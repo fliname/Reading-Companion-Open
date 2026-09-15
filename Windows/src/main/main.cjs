@@ -4,13 +4,18 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { ReadingStore } = require('./store.cjs');
-const { requestAI, cancelAI, listModels, detectOfficialProvider } = require('./ai-service.cjs');
+const { requestAI, cancelAI, listModels, detectOfficialProvider, generateFictionPageRangeSummary } = require('./ai-service.cjs');
 const OCRService = require('./ocr-service.cjs');
 const ObsidianService = require('./obsidian-service.cjs');
+const { checkForWindowsUpdate, downloadWindowsUpdate } = require('./update-service.cjs');
+const { EPUBImporter } = require('./epub-importer.cjs');
+const { KindleConverter } = require('./kindle-converter.cjs');
 
 const windows = new Map();
 const speechProcesses = new Map();
 let store;
+let updateCheckActive = false;
+let automaticUpdateChecked = false;
 
 if (!app.isPackaged) app.setName('Reading Companion Windows Preview');
 
@@ -30,7 +35,7 @@ function installApplicationMenu() {
     {
       label: '文件',
       submenu: [
-        { label: '打开 PDF…', accelerator: 'CmdOrCtrl+O', click: (_item, window) => sendToWindow(window, 'menu:open-pdf') },
+        { label: '打开 PDF / EPUB / AZW3 / MOBI…', accelerator: 'CmdOrCtrl+O', click: (_item, window) => sendToWindow(window, 'menu:open-pdf') },
         { label: '新建窗口', accelerator: 'CmdOrCtrl+N', click: () => createWindow() },
         { type: 'separator' },
         { label: '关闭窗口', accelerator: 'CmdOrCtrl+W', role: 'close' },
@@ -81,6 +86,12 @@ function installApplicationMenu() {
         { type: 'separator' },
         { label: '置于前台', click: (_item, window) => { window?.show(); window?.focus(); } }
       ]
+    },
+    {
+      label: '帮助',
+      submenu: [
+        { label: '检查更新…', click: (_item, window) => offerApplicationUpdate(window, true) }
+      ]
     }
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
@@ -107,7 +118,18 @@ function createWindow(initialProject = null) {
 
   windows.set(window.webContents.id, { window, initialProject });
   const webContentsID = window.webContents.id;
+  let flushTimer = null;
+  window.on('close', event => {
+    const context = windows.get(webContentsID);
+    if (!context || context.flushed || window.webContents.isDestroyed() || window.webContents.isCrashed()) return;
+    event.preventDefault();
+    if (flushTimer) return;
+    window.webContents.send('project:flush');
+    // A crashed or unresponsive renderer must not trap the window indefinitely.
+    flushTimer = setTimeout(() => { context.flushed = true; if (!window.isDestroyed()) window.close(); }, 5000);
+  });
   window.on('closed', () => {
+    clearTimeout(flushTimer);
     stopSpeech(webContentsID);
     windows.delete(webContentsID);
   });
@@ -116,7 +138,58 @@ function createWindow(initialProject = null) {
     return { action: 'deny' };
   });
   window.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  window.webContents.once('did-finish-load', () => {
+    if (process.env.RC_DISABLE_AUTO_UPDATE !== '1') setTimeout(() => offerApplicationUpdate(window, false), 2500);
+  });
   return window;
+}
+
+async function offerApplicationUpdate(window, manual = false) {
+  if (!manual && automaticUpdateChecked) return;
+  if (updateCheckActive || !window || window.isDestroyed()) return;
+  if (!manual) automaticUpdateChecked = true;
+  updateCheckActive = true;
+  try {
+    const update = await checkForWindowsUpdate(app.getVersion());
+    const saved = store.loadSettings();
+    if (!update) {
+      if (manual) await dialog.showMessageBox(window, { type: 'info', title: '检查更新', message: '当前已是最新版。', buttons: ['好'] });
+      return;
+    }
+    if (!manual && saved.skippedUpdateVersion === update.version) return;
+    const result = await dialog.showMessageBox(window, {
+      type: 'info',
+      title: 'Reading Companion Open 更新',
+      message: `发现 Windows 新版本 ${update.version}`,
+      detail: '可以立即下载安装；也可以稍后再升级。阅读项目和设置不会被删除。',
+      buttons: ['立即升级', '稍后提醒', '忽略此版本'],
+      defaultId: 0,
+      cancelId: 1
+    });
+    if (result.response === 2) {
+      store.saveSettings({ ...saved, skippedUpdateVersion: update.version });
+      return;
+    }
+    if (result.response !== 0) return;
+    window.webContents.send('update:progress', { message: `正在下载 ${update.version}…`, fraction: 0 });
+    const target = await downloadWindowsUpdate(
+      update,
+      path.join(app.getPath('temp'), 'Reading Companion Open Updates'),
+      fetch,
+      progress => sendIfAlive(window.webContents, 'update:progress', {
+        message: progress.expected ? `正在下载更新 · ${Math.round(progress.fraction * 100)}%` : '正在下载更新…',
+        fraction: progress.fraction
+      })
+    );
+    window.webContents.send('update:progress', { message: '安装包已下载，正在启动升级…', fraction: 1 });
+    const launchError = await shell.openPath(target);
+    if (launchError) throw new Error(`无法启动安装包：${launchError}`);
+    setTimeout(() => app.quit(), 800);
+  } catch (error) {
+    if (manual) await dialog.showMessageBox(window, { type: 'error', title: '检查更新', message: '暂时无法完成更新。', detail: error.message || String(error), buttons: ['好'] });
+  } finally {
+    updateCheckActive = false;
+  }
 }
 
 function resourcePath(name) {
@@ -138,13 +211,75 @@ function sendIfAlive(sender, channel, payload) {
 }
 
 function registerIPC() {
-  ipcMain.handle('dialog:open-pdf', async event => {
+  const openBookDialog = async event => {
     const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
-      title: '选择要伴读的 PDF',
+      title: '选择要伴读的图书',
       properties: ['openFile'],
-      filters: [{ name: 'PDF', extensions: ['pdf'] }]
+      filters: [{ name: '图书', extensions: ['pdf', 'epub', 'azw3', 'mobi'] }]
     });
     return result.canceled ? null : result.filePaths[0];
+  };
+  ipcMain.handle('dialog:open-book', openBookDialog);
+  ipcMain.handle('dialog:open-pdf', openBookDialog);
+
+  ipcMain.handle('book:import', async (event, sourcePath) => {
+    const ext = path.extname(sourcePath).toLowerCase();
+    const stat = fs.statSync(sourcePath);
+    const fingerprint = `${stat.size}|${Math.floor(stat.mtimeMs)}`;
+    const cacheVersion = 5;
+    const cached = store.loadReflowCache(sourcePath, fingerprint, cacheVersion);
+    if (cached) {
+      sendIfAlive(event.sender, 'book:import-progress', { progress: 0.98, message: '正在恢复电子书排版与目录…' });
+      return { ...cached, sourceFingerprint: fingerprint };
+    }
+    const progress = (value, message) => sendIfAlive(event.sender, 'book:import-progress', { progress: value, message });
+    let result;
+    if (ext === '.epub') {
+      result = EPUBImporter.importBook(sourcePath, { progress });
+    } else if (ext === '.azw3' || ext === '.mobi') {
+      const converter = resourcePath(path.join('BookConverter', 'mobitool.exe'));
+      if (fs.existsSync(converter)) {
+        progress(0.10, `正在离线解码 ${ext.slice(1).toUpperCase()}…`);
+        const converted = await KindleConverter.convertToEPUB(sourcePath, converter);
+        try {
+          result = EPUBImporter.importBook(converted.epubPath, {
+            progress: (value, message) => progress(0.30 + value * 0.68, message)
+          });
+        } finally {
+          fs.rmSync(converted.workingDirectory, { recursive: true, force: true });
+        }
+      } else if (ext === '.mobi') {
+        result = KindleConverter.convertClassic(sourcePath, { progress });
+      } else {
+        throw new Error('安装包缺少 AZW3/MOBI 解码组件，请重新安装完整版本。');
+      }
+    } else {
+      throw new Error('不支持的文件格式。支持 PDF、EPUB、AZW3、MOBI。');
+    }
+    result.sourceFingerprint = fingerprint;
+    store.saveReflowCache(sourcePath, fingerprint, cacheVersion, result);
+    return result;
+  });
+
+  ipcMain.handle('bookshelf:list-folders', () => store.listBookshelfFolders());
+  ipcMain.handle('bookshelf:create-folder', (_event, { name, parentID }) => store.createBookshelfFolder(name, parentID));
+  ipcMain.handle('bookshelf:rename-folder', (_event, { id, name }) => store.renameBookshelfFolder(id, name));
+  ipcMain.handle('bookshelf:delete-folder', (_event, id) => store.deleteBookshelfFolder(id));
+  ipcMain.handle('bookshelf:move-project', (_event, { sourcePath, folderID }) => { store.moveProject(sourcePath, folderID); return true; });
+  ipcMain.handle('bookshelf:set-folder-membership', (_event, { sourcePaths, folderID, included }) => (
+    store.setProjectsFolderMembership(sourcePaths, folderID, included)
+  ));
+  ipcMain.handle('bookshelf:set-category', (_event, { sourcePaths, category }) => { store.setProjectsCategory(sourcePaths, category); return true; });
+  ipcMain.handle('bookshelf:save-cover', (_event, { sourcePath, dataURL }) => {
+    const match = /^data:.*;base64,(.*)$/.exec(dataURL || '');
+    if (!match) throw new Error('无效的封面数据 URL。');
+    const buffer = Buffer.from(match[1], 'base64');
+    return store.saveCover(sourcePath, buffer);
+  });
+  ipcMain.handle('bookshelf:load-cover', (_event, sourcePath) => {
+    const target = store.coverAssetPath(sourcePath);
+    if (!fs.existsSync(target)) return null;
+    return `data:image/png;base64,${fs.readFileSync(target).toString('base64')}`;
   });
 
   ipcMain.handle('dialog:open-folder', async event => {
@@ -156,7 +291,8 @@ function registerIPC() {
   });
 
   ipcMain.handle('pdf:read', (_event, sourcePath) => {
-    if (!sourcePath || path.extname(sourcePath).toLowerCase() !== '.pdf') throw new Error('目前只支持 PDF 文件。');
+    if (!sourcePath) throw new Error('请先选择文件。');
+    if (path.extname(sourcePath).toLowerCase() !== '.pdf') return null;
     return fs.readFileSync(sourcePath);
   });
   ipcMain.handle('file:stat', (_event, target) => {
@@ -173,12 +309,20 @@ function registerIPC() {
   ));
   ipcMain.handle('ocr:cancel', (_event, jobId) => OCRService.cancel(jobId));
 
+  ipcMain.on('project:flushed', event => {
+    const context = windows.get(event.sender.id);
+    if (!context) return;
+    context.flushed = true;
+    context.window.close();
+  });
   ipcMain.handle('project:initial', event => windows.get(event.sender.id)?.initialProject || null);
   ipcMain.handle('project:list', () => store.listProjects());
   ipcMain.handle('project:load', (_event, sourcePath) => store.loadProject(sourcePath));
   ipcMain.handle('project:save', (_event, { sourcePath, state }) => {
     store.saveProject(sourcePath, state);
-    store.registerProject(sourcePath, state.documentTitle || path.basename(sourcePath, '.pdf'));
+    store.registerProject(sourcePath, state.documentTitle || path.basename(sourcePath, path.extname(sourcePath)), {
+      category: state.bookCategory
+    });
     return true;
   });
   ipcMain.handle('project:delete', (_event, sourcePath) => {
@@ -212,6 +356,9 @@ function registerIPC() {
     if (!event.sender.isDestroyed()) event.sender.send('ai:progress', { id: request.id, delta });
   }));
   ipcMain.handle('ai:cancel', (_event, id) => cancelAI(id));
+  ipcMain.handle('ai:fiction-summary', async (event, request) => generateFictionPageRangeSummary(request, delta => {
+    if (!event.sender.isDestroyed()) event.sender.send('ai:progress', { id: request.id, delta });
+  }));
 
   ipcMain.handle('speech:start', (event, language = 'zh-CN') => {
     const sender = event.sender;
@@ -279,6 +426,7 @@ function registerIPC() {
   ipcMain.handle('system:join-path', (_event, parts) => path.join(...parts.map(String)));
   ipcMain.handle('system:resource-path', (_event, name) => resourcePath(name));
   ipcMain.handle('system:sha256', (_event, value) => crypto.createHash('sha256').update(String(value), 'utf8').digest('hex'));
+  ipcMain.handle('update:check', event => offerApplicationUpdate(BrowserWindow.fromWebContents(event.sender), true));
 }
 
 app.whenReady().then(() => {

@@ -38,7 +38,7 @@ struct ReadingCompanionApp: App {
                     .disabled(focusedModel?.canRedoHighlight != true)
             }
             CommandGroup(replacing: .newItem) {
-                Button("打开 PDF…") { focusedModel?.presentOpenPanel() }
+                Button("打开 PDF / EPUB / AZW3 / MOBI…") { focusedModel?.presentOpenPanel() }
                     .keyboardShortcut("o")
             }
             CommandMenu("阅读") {
@@ -64,7 +64,7 @@ private struct ReaderProjectWindow: View {
             .frame(minWidth: 1_080, minHeight: 680)
             .task(id: documentPath) {
                 guard let documentPath, model.documentURL?.standardizedFileURL.path != documentPath else { return }
-                model.open(URL(fileURLWithPath: documentPath))
+                model.openExisting(URL(fileURLWithPath: documentPath))
             }
     }
 }

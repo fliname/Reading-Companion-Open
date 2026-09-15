@@ -377,6 +377,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case thumbnails = "缩略图"
     case bookmarks = "书签"
     case highlights = "划线"
+    case characters = "人物"
     case search = "搜索"
 
     var id: String { rawValue }
@@ -387,15 +388,80 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .thumbnails: "rectangle.grid.1x2"
         case .bookmarks: "bookmark"
         case .highlights: "highlighter"
+        case .characters: "person.2"
         case .search: "magnifyingglass"
         }
     }
+}
+
+enum BookCategory: String, CaseIterable, Codable, Identifiable, Sendable {
+    case nonfiction = "非虚构类"
+    case fiction = "虚构类"
+
+    var id: String { rawValue }
+
+    var detail: String {
+        switch self {
+        case .nonfiction: "使用原学术伴读框架、快捷问题和结构化章节概要"
+        case .fiction: "使用简短事实问答与适度文学分析，并启用人物导航"
+        }
+    }
+
+    var markerColor: NSColor {
+        switch self {
+        case .nonfiction: .systemBlue
+        case .fiction: .systemPink
+        }
+    }
+
+    var companionMode: AICompanionMode {
+        switch self {
+        case .nonfiction: .academic
+        case .fiction: .free
+        }
+    }
+}
+
+struct PageRangeSummaryRecord: Identifiable, Codable, Hashable, Sendable {
+    var id = UUID()
+    var startPage: Int
+    var endPage: Int
+    var summary: String
+    var createdAt = Date()
+    var reflowAnchors: [ReflowTextAnchor]? = nil
+
+    var pageLabel: String {
+        startPage == endPage ? "第 \(startPage) 页" : "第 \(startPage)–\(endPage) 页"
+    }
+}
+
+struct PageRangeSummaryRequest: Equatable, Sendable {
+    var id = UUID()
+    var startPage: Int
+    var endPage: Int
+    var reflowAnchors: [ReflowTextAnchor]? = nil
 }
 
 enum ReaderDisplayMode: String, CaseIterable, Identifiable {
     case single = "单页"
 
     var id: String { rawValue }
+}
+
+enum ReflowPageMode: String, CaseIterable, Identifiable {
+    case automatic = "自动"
+    case single = "单页"
+    case double = "双页"
+
+    var id: String { rawValue }
+
+    var detail: String {
+        switch self {
+        case .automatic: "展开任一侧栏时单页；左右侧栏都收起时双页"
+        case .single: "始终以单页阅读"
+        case .double: "始终以左右双页阅读"
+        }
+    }
 }
 
 enum ReaderFitMode: String, CaseIterable, Identifiable {
@@ -442,6 +508,100 @@ enum ChatNoteExportMode: String, CaseIterable, Identifiable {
     case condensed = "整理浓缩"
 
     var id: String { rawValue }
+}
+
+enum AICompanionMode: String, CaseIterable, Identifiable, Codable {
+    case academic = "非虚构类"
+    case free = "虚构类"
+
+    var id: String { rawValue }
+
+    var detail: String {
+        switch self {
+        case .academic: "按伴读框架重建论证，并在结尾提出一个碰撞问题"
+        case .free: "面向小说和轻阅读，只做简短事实回答或适度文学分析"
+        }
+    }
+}
+
+enum CharacterTint: String, CaseIterable, Codable, Identifiable, Sendable {
+    case coral = "珊瑚"
+    case orange = "橙色"
+    case yellow = "黄色"
+    case green = "绿色"
+    case blue = "蓝色"
+    case purple = "紫色"
+
+    var id: String { rawValue }
+
+    var color: NSColor {
+        switch self {
+        case .coral: .systemPink
+        case .orange: .systemOrange
+        case .yellow: .systemYellow
+        case .green: .systemGreen
+        case .blue: .systemBlue
+        case .purple: .systemPurple
+        }
+    }
+
+    var cssColor: String {
+        let converted = color.usingColorSpace(.deviceRGB) ?? color
+        return String(
+            format: "rgba(%d,%d,%d,0.34)",
+            Int(converted.redComponent * 255),
+            Int(converted.greenComponent * 255),
+            Int(converted.blueComponent * 255)
+        )
+    }
+}
+
+struct BookCharacter: Identifiable, Codable, Hashable, Sendable {
+    var id = UUID()
+    var name: String
+    var aliases: [String] = []
+    var identity: String = ""
+    var relationship: String = ""
+    var tint: CharacterTint = .coral
+    /// A per-character sRGB color. Optional so projects created before 0.45 remain decodable.
+    var colorHex: String? = nil
+
+    var color: NSColor {
+        guard let colorHex else { return tint.color }
+        let value = colorHex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        guard value.count == 6, let rgb = Int(value, radix: 16) else { return tint.color }
+        return NSColor(
+            srgbRed: CGFloat((rgb >> 16) & 0xFF) / 255,
+            green: CGFloat((rgb >> 8) & 0xFF) / 255,
+            blue: CGFloat(rgb & 0xFF) / 255,
+            alpha: 1
+        )
+    }
+
+    var cssColor: String {
+        let converted = color.usingColorSpace(.sRGB) ?? color
+        return String(
+            format: "rgba(%d,%d,%d,0.34)",
+            Int(converted.redComponent * 255),
+            Int(converted.greenComponent * 255),
+            Int(converted.blueComponent * 255)
+        )
+    }
+
+    var information: String {
+        [identity, relationship]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "，")
+    }
+
+    var allNames: [String] {
+        var seen = Set<String>()
+        return ([name] + aliases)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
+            .sorted { $0.count > $1.count }
+    }
 }
 
 enum AIReadingDepth: String, CaseIterable, Identifiable, Codable {
@@ -895,8 +1055,13 @@ enum HighlightFragmentNormalizer {
                 merged.append(HighlightFragment(pageIndex: fragment.pageIndex, bounds: rect))
                 continue
             }
-            let existing = merged[index].bounds.cgRect.standardized
-            merged[index] = HighlightFragment(pageIndex: fragment.pageIndex, bounds: existing.union(rect))
+            var combined = merged.remove(at: index).bounds.cgRect.standardized.union(rect)
+            while let neighbor = merged.firstIndex(where: {
+                $0.pageIndex == fragment.pageIndex && belongsToSameVisualLine($0.bounds.cgRect, combined)
+            }) {
+                combined = combined.union(merged.remove(at: neighbor).bounds.cgRect)
+            }
+            merged.append(HighlightFragment(pageIndex: fragment.pageIndex, bounds: combined))
         }
         return merged.sorted(by: readingOrder)
     }
@@ -904,9 +1069,10 @@ enum HighlightFragmentNormalizer {
     private static func belongsToSameVisualLine(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
         let verticalOverlap = max(0, min(lhs.maxY, rhs.maxY) - max(lhs.minY, rhs.minY))
         let overlapRatio = verticalOverlap / max(min(lhs.height, rhs.height), 0.001)
-        guard overlapRatio >= 0.62 else { return false }
+        guard overlapRatio >= 0.62,
+              abs(lhs.midY - rhs.midY) <= min(lhs.height, rhs.height) * 0.3 else { return false }
         let horizontalGap = max(max(lhs.minX, rhs.minX) - min(lhs.maxX, rhs.maxX), 0)
-        let tolerance = max(2.0, min(lhs.height, rhs.height) * 0.22)
+        let tolerance = max(2.0, min(lhs.height, rhs.height) * 0.9)
         return horizontalGap <= tolerance
     }
 
@@ -934,6 +1100,13 @@ struct HighlightRecord: Identifiable, Codable, Hashable {
     var fragments: [HighlightFragment]? = nil
     var noteExportedAt: Date? = nil
     var kind: ReadingMarkKind? = nil
+    /// Stable DOM text offsets for EPUB/AZW3/MOBI. PDF records leave this nil.
+    var reflowAnchor: ReflowTextAnchor? = nil
+    var reflowAnchors: [ReflowTextAnchor]? = nil
+
+    var allReflowAnchors: [ReflowTextAnchor] {
+        reflowAnchors ?? reflowAnchor.map { [$0] } ?? []
+    }
 
     var allFragments: [HighlightFragment] {
         guard let fragments, !fragments.isEmpty else {
@@ -968,6 +1141,9 @@ struct SearchRecord: Identifiable, Hashable {
     let id = UUID()
     var text: String
     var pageIndex: Int
+    var occurrenceIndexInPage: Int = 0
+    var query: String? = nil
+    var offsetInPage: Int = 0
 }
 
 struct ReadingQuestionPayload: Hashable {
